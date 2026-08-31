@@ -31,7 +31,7 @@ This engine replaces standard matrix multiplications and attention mechanisms wi
 
 To ensure accuracy, all latency measurements in this repository are captured using native Metal GPU execution timestamps (`GPUStartTime` / `GPUEndTime`), isolating pure kernel compute time from CPU driver dispatch overhead.
 
-The test suite rigorously validates numerical stability across non-aligned and edge-case sequence boundaries ($M \in [33, 127, 128, 129, 512, 1023, 1024, 2047, 2048]$) to ensure causal masking and thread-group guards hold under stress, and verifies sustained thermal equilibrium under continuous 60-second loads.
+The test suite rigorously validates numerical stability across non-aligned and edge-case sequence boundaries (M ∈ [33, 127, 128, 129, 512, 1023, 1024, 2047, 2048]) to ensure causal masking and thread-group guards hold under stress, and verifies sustained thermal equilibrium under continuous 60-second loads.
 
 ## ⚠️ Target Audience & Usage Disclaimer
 

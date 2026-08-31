@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ page.title | default: site.title }}</title>
+  <meta name="description" content="{{ page.description | default: site.description }}">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,300;0,8..60,400;0,8..60,600;1,8..60,300;1,8..60,400&family=Inter:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:          #F5F4EF;
+      --surface:     #EFEDE6;
+      --border:      #D8D5CC;
+      --accent:      #D97757;
+      --accent-dim:  #C4623E;
+      --text:        #1A1A18;
+      --text-muted:  #6B6860;
+      --text-light:  #9B998F;
+      --serif:       'Source Serif 4', Georgia, serif;
+      --sans:        'Inter', system-ui, sans-serif;
+      --mono:        'JetBrains Mono', 'Fira Code', monospace;
+      --max-w:       720px;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--serif);
+      font-size: 17px;
+      line-height: 1.75;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── Top bar ── */
+    header {
+      border-bottom: 1px solid var(--border);
+      background: var(--bg);
+      padding: 0 2rem;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    .header-inner {
+      max-width: var(--max-w);
+      margin: 0 auto;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 52px;
+    }
+    .site-wordmark {
+      font-family: var(--sans);
+      font-size: 13px;
+      font-weight: 500;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      text-decoration: none;
+    }
+    .site-wordmark span { color: var(--accent); }
+
+    /* ── Hero / title block ── */
+    .hero {
+      max-width: var(--max-w);
+      margin: 0 auto;
+      padding: 4rem 2rem 2.5rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .hero-label {
+      font-family: var(--sans);
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 1rem;
+    }
+    .hero h1 {
+      font-family: var(--serif);
+      font-size: clamp(1.8rem, 4vw, 2.6rem);
+      font-weight: 300;
+      line-height: 1.2;
+      letter-spacing: -0.02em;
+      color: var(--text);
+      margin-bottom: 1.25rem;
+    }
+    .hero-meta {
+      font-family: var(--sans);
+      font-size: 13px;
+      color: var(--text-muted);
+      display: flex;
+      gap: 1.5rem;
+      flex-wrap: wrap;
+    }
+    .hero-meta a { color: var(--text-muted); text-decoration: none; border-bottom: 1px solid var(--border); }
+    .hero-meta a:hover { color: var(--accent); border-color: var(--accent); }
+
+    /* ── Main content ── */
+    main {
+      max-width: var(--max-w);
+      margin: 0 auto;
+      padding: 3rem 2rem 6rem;
+    }
+
+    /* Headings */
+    h1, h2, h3, h4 {
+      font-family: var(--serif);
+      font-weight: 400;
+      letter-spacing: -0.01em;
+      color: var(--text);
+      margin-top: 2.5rem;
+      margin-bottom: 0.6rem;
+      line-height: 1.3;
+    }
+    main h1 { font-size: 2rem; font-weight: 300; }
+    h2 {
+      font-size: 1.3rem;
+      font-weight: 600;
+      padding-top: 0.5rem;
+      border-top: 1px solid var(--border);
+      margin-top: 3rem;
+    }
+    h3 { font-size: 1.1rem; font-weight: 600; color: var(--text); margin-top: 2rem; }
+    h4 { font-size: 1rem; font-weight: 600; font-style: italic; color: var(--text-muted); }
+
+    p { margin-bottom: 1.25rem; }
+    p:last-child { margin-bottom: 0; }
+
+    /* Links */
+    a { color: var(--accent-dim); text-decoration: none; border-bottom: 1px solid transparent; transition: border-color 0.15s; }
+    a:hover { border-bottom-color: var(--accent-dim); }
+
+    /* Strong */
+    strong { font-weight: 600; color: var(--text); }
+    em { font-style: italic; }
+
+    /* Blockquote */
+    blockquote {
+      background: var(--surface);
+      border-left: 3px solid var(--accent);
+      border-radius: 2px;
+      margin: 1.5rem 0;
+      padding: 1rem 1.25rem;
+      font-family: var(--sans);
+      font-size: 14px;
+      color: var(--text-muted);
+      line-height: 1.6;
+    }
+    blockquote p { margin: 0; }
+    blockquote strong { color: var(--text); }
+    blockquote a { color: var(--accent); border-bottom: 1px solid var(--border); }
+    blockquote a:hover { border-color: var(--accent); }
+
+    /* Lists */
+    ul, ol {
+      padding-left: 1.5rem;
+      margin-bottom: 1.25rem;
+    }
+    li { margin-bottom: 0.4rem; }
+    ul { list-style: none; }
+    ul li::before {
+      content: '\2014';
+      color: var(--accent);
+      font-weight: 600;
+      display: inline-block;
+      width: 1.5rem;
+      margin-left: -1.5rem;
+    }
+
+    /* Inline code */
+    code {
+      font-family: var(--mono);
+      font-size: 0.82em;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 0.1em 0.35em;
+      color: var(--text);
+    }
+
+    /* Code blocks */
+    pre {
+      background: #1C1B19;
+      border-radius: 6px;
+      overflow-x: auto;
+      padding: 1.25rem 1.5rem;
+      margin: 1.5rem 0;
+      border: 1px solid #2E2D2A;
+    }
+    pre code {
+      background: none;
+      border: none;
+      padding: 0;
+      color: #D4D0C8;
+      font-size: 0.83em;
+      line-height: 1.65;
+    }
+
+    /* Horizontal rule */
+    hr {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 3rem 0;
+    }
+
+    /* ── Footer ── */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 1.5rem 2rem;
+      font-family: var(--sans);
+      font-size: 12px;
+      color: var(--text-light);
+    }
+    .footer-inner {
+      max-width: var(--max-w);
+      margin: 0 auto;
+      display: flex;
+      gap: 1rem;
+      justify-content: space-between;
+      flex-wrap: wrap;
+    }
+    footer a { color: var(--text-light); border-bottom: 1px solid transparent; }
+    footer a:hover { color: var(--accent); border-color: var(--accent); }
+
+    /* ── Responsive ── */
+    @media (max-width: 640px) {
+      .hero { padding: 2.5rem 1.25rem 2rem; }
+      main { padding: 2rem 1.25rem 4rem; }
+      header { padding: 0 1.25rem; }
+      footer { padding: 1.25rem 1.25rem; }
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="header-inner">
+      <a class="site-wordmark" href="{{ '/' | relative_url }}">
+        M4 Prefill <span>Engine</span>
+      </a>
+      <a class="site-wordmark" href="https://github.com/mohamedhossammohamed/m4-prefill-engine" target="_blank" rel="noopener">
+        GitHub &#8599;
+      </a>
+    </div>
+  </header>
+
+  <div class="hero">
+    <p class="hero-label">Technical Report &middot; Apple Silicon Systems</p>
+    <h1>{{ site.title }}</h1>
+    <div class="hero-meta">
+      <span>Mohammed Hossam</span>
+      <span>M4 MacBook Air &middot; 10-core GPU &middot; 16 GB Unified Memory</span>
+      <a href="https://mohamedhossammohamed.github.io/m4-prefill-engine/" target="_blank" rel="noopener">Live Docs &#8599;</a>
+    </div>
+  </div>
+
+  <main>
+    {{ content }}
+  </main>
+
+  <footer>
+    <div class="footer-inner">
+      <span>&copy; 2026 Mohammed Hossam. Apache 2.0.</span>
+      <span>
+        <a href="https://x.com/MohamedHz72007" target="_blank" rel="noopener">X / Twitter</a>
+        &nbsp;&middot;&nbsp;
+        <a href="https://github.com/mohamedhossammohamed" target="_blank" rel="noopener">GitHub</a>
+      </span>
+    </div>
+  </footer>
+
+</body>
+</html>

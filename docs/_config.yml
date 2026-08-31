@@ -1,4 +1,3 @@
-theme: jekyll-theme-cayman
 title: M4 Prefill Engine
 description: Exploring the limits of LLM prompt processing on Apple Silicon.
 show_downloads: false

@@ -219,3 +219,88 @@ in-pipeline attention (1.352 ms => ~25.8 TFLOP/s on executed causal FLOPs) sits 
 above it, which means the reference is a floor on the true ceiling rather than a wall. The
 honest roofline comparison remains the cold isolated measurement: 2.55 ms at M=2048, 54% of
 that reference, against 8% before, and 82% of a cold MLX `scaled_dot_product_attention`.
+
+---
+
+# Phase 4a.3 / 4c — Q4_0 GEMM and the fusion question
+
+New kernel `sg_gemm_q4_0_impl<FUSED, BM>` replaces both `pipe_gemm_q4_0_32x32` and
+`fused_gate_up_swiglu_q4_0`: 128 threads (4 simdgroups), BN=64 output columns per
+threadgroup (16 per simdgroup), BK=32 so one dequant step is exactly one q4_0 block.
+B is dequantised into threadgroup memory as `[n][k]` and fed to the matrix units
+transposed, which also makes the dequant writes contiguous. Selectable with `M3_SG_GEMM=0`.
+
+New instrument: `mlp_bench` (isolated A/B + CPU FP32 reference).
+
+## 4c: is the M4-era fusion still a win? No -- it costs 63%.
+
+M=2048, K=4096, N=14336, GPU timestamps, median of 9 after 3 warmup:
+
+| config | ms (IQR) | vs upstream | TFLOP/s | % of 24.8 ref |
+|---|---|---|---|---|
+| fused scalar (upstream) | 45.861 (0.035) | 1.00x | 10.49 | 42% |
+| **unfused scalar** | **28.151 (0.011)** | **1.63x** | 17.09 | 69% |
+| fused simdgroup, BM=32 | 22.197 (0.002) | 2.07x | 21.67 | 87% |
+| unfused simdgroup | 21.408 (0.004) | 2.14x | 22.47 | 91% |
+| fused simdgroup, BM=64 | 599.421 (1.898) | 0.08x | 0.80 | 3% |
+
+**Simply unfusing the upstream kernel -- changing no kernel code, just dispatching the
+existing `pipe_gemm_q4_0_32x32` twice plus the existing `swiglu_activation` -- is worth
+1.63x.** The fusion that saved a memory pass on a 10-core M4 costs 63% on an 80-core M3
+Ultra, because what it actually buys is `acc_g[32] + acc_u[32]` = 64 float accumulator
+registers per thread. The memory pass it saves is worth ~0.4 ms here; the register pressure
+costs ~17 ms. This is the clearest single confirmation that the bottleneck moved.
+
+Down projection (M=2048, K=14336, N=4096): 14.402 -> 11.139 ms, 1.29x, 16.70 -> 21.59
+TFLOP/s (67% -> 87% of reference).
+
+## Negative result: BM=64 on the fused kernel (do not retry)
+Doubling the row tile halves how often each weight column is re-read from device memory
+(M/64 passes instead of M/32), which looked like free money since weight re-reads are
+~6 ms of the 22. It is a **27x slowdown**. At BM=64 the fused kernel needs 32 float8x8
+accumulators = 64 floats/thread *and* 32 KB of threadgroup memory for the epilogue staging
+(the full per-threadgroup limit, so one threadgroup per core). Registers spill and occupancy
+collapses: 0.80 TFLOP/s.
+
+The first run of this experiment was also numerically wrong (max-diff 0.44) because the
+harness was still passing 16 KB of threadgroup memory. That was fixed and re-measured before
+recording: the corrected run is numerically identical to the other variants (max-diff
+0.00049) and still 27x slow, so the result is attributable to the register/occupancy cliff
+and not to the bug.
+
+Kept BM=32 fused for the engine: 3.6% behind unfused-simdgroup on this stage (0.8 ms, ~1% of
+the layer) but a drop-in replacement needing no extra 117 MB of intermediate buffers.
+
+## Fidelity (CPU FP32 reference, K=4096, N=512)
+The simdgroup GEMM is **2.5-3x tighter than upstream at every shape** -- the scalar kernels
+sum 32 half products into a `half4` before promoting to float, while the matrix units
+accumulate in float throughout.
+
+| shape | M | simdgroup max-abs | upstream max-abs |
+|---|---|---|---|
+| gate/up | 1 / 33 / 63 / 64 / 65 | 0.00005-0.00010 | 0.00013-0.00028 |
+| gate/up | 127 / 128 / 129 / 255 / 512 | 0.00008-0.00011 | 0.00025-0.00039 |
+| down | 1 / 33 / 64 / 129 / 512 | 0.00028-0.00035 | 0.00062-0.00085 |
+
+Cosine 1.000000 everywhere, both kernels.
+
+## Full engine, 8B, M=2048, one layer
+
+| stage | baseline | untuned upstream | after port |
+|---|---|---|---|
+| QKV projections | 18.75 | 12.42 | 12.42 (**still untouched**) |
+| causal attention | 20.48 | 17.24 | 1.579 (13.0x) |
+| output projection | 6.34 | 4.19 | 3.246 (1.29x) |
+| MLP SwiGLU + down | 66.34 | 60.26 | 33.415 (1.80x) |
+| **total / layer** | 111.91 | 94.10 | **50.50** |
+| 32-layer prefill | 3581 ms | 3013 ms | **1616 ms** |
+| engine vs its own baseline | 1.00x | 1.19x | **2.22x** |
+| throughput | 18,300 tok/s | 21,752 tok/s | **40,557 tok/s** |
+
+Engine gate `[PASS]` on both KV paths at M=128/512/1024, MaxDiff unchanged, AvgDiff and RMSE
+both improved (RMSE 0.00011 -> 0.00008 at M=128).
+
+Cold MLX reference for the same layer is 44.43 ms, so the engine is now at **88% of MLX**,
+from 47% at the start. The entire remaining gap is QKV: 12.42 ms against MLX's 9.20 ms.
+`pipe_qkv_head_gemm_q4_0` is the last scalar GEMM -- it writes directly into [H, M, D] head
+layout, which is why it was not covered by the generic replacement.

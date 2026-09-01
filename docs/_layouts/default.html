@@ -202,6 +202,40 @@
       line-height: 1.65;
     }
 
+    /* Tables */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1.75rem 0;
+      font-family: var(--sans);
+      font-size: 13.5px;
+      line-height: 1.5;
+      display: block;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+    }
+    th, td {
+      border: 1px solid var(--border);
+      padding: 0.65rem 0.9rem;
+      text-align: center;
+      white-space: nowrap;
+    }
+    th {
+      background: var(--surface);
+      font-weight: 600;
+      color: var(--text);
+      font-size: 12px;
+      letter-spacing: 0.03em;
+    }
+    tr:nth-child(even) {
+      background: rgba(0, 0, 0, 0.02);
+    }
+    td strong {
+      color: var(--accent-dim);
+    }
+
     /* Horizontal rule */
     hr {
       border: none;

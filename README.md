@@ -26,7 +26,7 @@ This engine replaces standard matrix multiplications and attention mechanisms wi
 ### Benchmarking Methodology, Disclosures & Baseline Standards
 
 > **[Disclosure & Baseline Standards]**  
-> All cross-engine numbers use synthetic in-UMA weights with exact model shapes, zero disk I/O, zero tokenizer overhead (where $M$ is the exact prompt token count), and prefill-only (single forward pass, no autoregressive generation). This isolates low-level kernel execution on identical physical tensor layouts.
+> All cross-engine numbers use synthetic in-UMA weights with exact model shapes, zero disk I/O, zero tokenizer overhead (where M is the exact prompt token count), and prefill-only (single forward pass, no autoregressive generation). This isolates low-level kernel execution on identical physical tensor layouts.
 
 *   **Primary Baseline (Apple MLX):** **Apple MLX (v0.32.2)** is the official, primary baseline for this project. Early exploratory prototypes informally referenced application-level runtimes (such as Ollama); all such references have been retired in favor of Apple MLX to ensure strict, reproducible, and unimpeachable systems metrology. MLX represents the gold-standard native framework on Apple Silicon.
 *   **Secondary Reference Baseline (llama.cpp-Style):** An in-house Metal reimplementation of `ggml`'s `kernel_mul_mm_q4_0` matrix multiplication kernel from `llama.cpp` (calibrated at ~8–10 TFLOPS on M4) is provided as an open-source C++/Metal reference.
@@ -48,47 +48,47 @@ To contextualize the engine's performance, we executed a head-to-head prefill-on
 
 ### The Architectural Trade-off: Aligned vs. Unaligned Boundaries
 The results highlight a fascinating physical trade-off on the M4 architecture:
-*   **vs. Apple MLX Baseline (Aligned Powers-of-2):** MLX's heavily optimized JIT compiler excels at perfectly aligned, power-of-2 dense matrix blocks ($M=512, 1024, 2048$), outperforming our engine by 14–31% on 1B shapes and long 8B batches.
-*   **vs. Apple MLX Baseline (Unaligned Edge Boundaries):** On arbitrary, real-world prompt boundaries (e.g., $M=128, 129$), our engine's custom Metal routing and direct-head projections eliminate dynamic padding and transposition overhead. This allows our engine to outperform MLX by up to **1.25x (+25%)** on unaligned 8B edge cases.
+*   **vs. Apple MLX Baseline (Aligned Powers-of-2):** MLX's heavily optimized JIT compiler excels at perfectly aligned, power-of-2 dense matrix blocks (M = 512, 1024, 2048), outperforming our engine by 14–31% on 1B shapes and long 8B batches.
+*   **vs. Apple MLX Baseline (Unaligned Edge Boundaries):** On arbitrary, real-world prompt boundaries (e.g., M = 128, 129), our engine's custom Metal routing and direct-head projections eliminate dynamic padding and transposition overhead. This allows our engine to outperform MLX by up to **1.25x (+25%)** on unaligned 8B edge cases.
 *   **vs. llama.cpp-Style Reference:** Our custom engine delivers a consistent **1.19x to 1.76x speedup** across all scales and prompt boundaries, demonstrating the impact of 128-bit LSU saturation and fused dequantization.
 
 ---
 
-### 8B Architecture ($K=4096, H=32, D=128, N_{\text{mlp}}=14336$, 32 Layers)
+### 8B Architecture (K=4096, H=32, D=128, N_mlp=14336, 32 Layers)
 
 *At 8B scale, a single layer's weights (~130.5 MB) exceed the Apple M4's 24 MB SLC by ~5.4x, operating heavily in DRAM streaming.*
 
-| Prompt ($M$) | Boundary Type | Apple MLX Metal (Primary Baseline) | Our Engine (Wall) | GPU-only (ours) | vs. MLX Baseline | llama.cpp-style (Reference) | vs. llama.cpp Ref |
+| Prompt (M) | Boundary Type | Apple MLX Metal (Primary Baseline) | Our Engine (Wall) | GPU-only (ours) | vs. MLX Baseline | llama.cpp-style (Reference) | vs. llama.cpp Ref |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | **33** | Edge (Unaligned) | **17.61 ms** | 20.67 ms | 20.39 ms | 0.85x (MLX +17%) | 25.39 ms | **1.23x Faster** |
 | **127** | Edge (Unaligned) | **39.41 ms** | 40.45 ms | 40.13 ms | 0.97x (≈ Parity) | 47.99 ms | **1.19x Faster** |
-| **128** | Aligned ($2^7$) | 41.09 ms | **39.19 ms** | 38.84 ms | **1.05x (Ours +5%)** | 49.72 ms | **1.27x Faster** |
+| **128** | Aligned (2^7) | 41.09 ms | **39.19 ms** | 38.84 ms | **1.05x (Ours +5%)** | 49.72 ms | **1.27x Faster** |
 | **129** | Edge (Unaligned) | 67.74 ms | **54.34 ms** | 53.96 ms | **1.25x (Ours +25%)** | 79.93 ms | **1.47x Faster** |
-| **512** | Aligned ($2^9$) | **155.32 ms** | 163.95 ms | 163.59 ms | 0.95x (≈ Parity) | 216.23 ms | **1.32x Faster** |
+| **512** | Aligned (2^9) | **155.32 ms** | 163.95 ms | 163.59 ms | 0.95x (≈ Parity) | 216.23 ms | **1.32x Faster** |
 | **1023** | Edge (Unaligned) | **329.61 ms** | 363.65 ms | 363.28 ms | 0.91x (MLX +10%) | 464.58 ms | **1.28x Faster** |
-| **1024** | Aligned ($2^{10}$) | **307.27 ms** | 359.64 ms | 359.32 ms | 0.85x (MLX +17%) | 455.40 ms | **1.27x Faster** |
+| **1024** | Aligned (2^10) | **307.27 ms** | 359.64 ms | 359.32 ms | 0.85x (MLX +17%) | 455.40 ms | **1.27x Faster** |
 | **2047** | Edge (Unaligned) | **640.67 ms** | 801.28 ms | 800.72 ms | 0.80x (MLX +25%) | 1102.36 ms | **1.38x Faster** |
-| **2048** | Aligned ($2^{11}$) | **612.59 ms** | 763.03 ms | 762.69 ms | 0.80x (MLX +25%) | 1075.05 ms | **1.41x Faster** |
+| **2048** | Aligned (2^11) | **612.59 ms** | 763.03 ms | 762.69 ms | 0.80x (MLX +25%) | 1075.05 ms | **1.41x Faster** |
 
 *Numerical precision: MaxDiff ≤ 0.0044 vs CPU gold reference, 0 NaN/Inf. Note: Opt Q8_0 KV is a custom-only feature (750.69 ms at M=2048, 1.43x vs reference); MLX path runs standard FP16 KV.*
 
 ---
 
-### 1B Architecture ($K=2048, H=32, D=64, N_{\text{mlp}}=5632$, 16 Layers)
+### 1B Architecture (K=2048, H=32, D=64, N_mlp=5632, 16 Layers)
 
-*Note: The original 1B scorecard used $H=16$; this cross-engine suite uses $H=32$ (LLaMA-3.2-1B standard); the two tables are not cross-comparable.*
+*Note: The original 1B scorecard used H=16; this cross-engine suite uses H=32 (LLaMA-3.2-1B standard); the two tables are not cross-comparable.*
 
-| Prompt ($M$) | Boundary Type | Apple MLX Metal (Primary Baseline) | Our Engine (Wall) | GPU-only (ours) | vs. MLX Baseline | llama.cpp-style (Reference) | vs. llama.cpp Ref |
+| Prompt (M) | Boundary Type | Apple MLX Metal (Primary Baseline) | Our Engine (Wall) | GPU-only (ours) | vs. MLX Baseline | llama.cpp-style (Reference) | vs. llama.cpp Ref |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | **33** | Edge (Unaligned) | **3.74 ms** | 4.74 ms | 4.45 ms | 0.79x (MLX +27%) | 5.94 ms | **1.25x Faster** |
 | **127** | Edge (Unaligned) | **6.48 ms** | 8.27 ms | 7.98 ms | 0.78x (MLX +28%) | 10.22 ms | **1.24x Faster** |
-| **128** | Aligned ($2^7$) | **6.33 ms** | 8.28 ms | 7.97 ms | 0.76x (MLX +31%) | 10.07 ms | **1.22x Faster** |
+| **128** | Aligned (2^7) | **6.33 ms** | 8.28 ms | 7.97 ms | 0.76x (MLX +31%) | 10.07 ms | **1.22x Faster** |
 | **129** | Edge (Unaligned) | **8.24 ms** | 9.71 ms | 9.44 ms | 0.85x (MLX +18%) | 14.79 ms | **1.52x Faster** |
-| **512** | Aligned ($2^9$) | **23.41 ms** | 30.13 ms | 29.82 ms | 0.78x (MLX +29%) | 41.63 ms | **1.38x Faster** |
+| **512** | Aligned (2^9) | **23.41 ms** | 30.13 ms | 29.82 ms | 0.78x (MLX +29%) | 41.63 ms | **1.38x Faster** |
 | **1023** | Edge (Unaligned) | **47.57 ms** | 62.24 ms | 61.91 ms | 0.76x (MLX +31%) | 95.65 ms | **1.54x Faster** |
-| **1024** | Aligned ($2^{10}$) | **49.78 ms** | 63.14 ms | 62.82 ms | 0.79x (MLX +27%) | 95.86 ms | **1.52x Faster** |
+| **1024** | Aligned (2^10) | **49.78 ms** | 63.14 ms | 62.82 ms | 0.79x (MLX +27%) | 95.86 ms | **1.52x Faster** |
 | **2047** | Edge (Unaligned) | **122.16 ms** | 141.23 ms | 140.94 ms | 0.86x (MLX +16%) | 248.72 ms | **1.76x Faster** |
-| **2048** | Aligned ($2^{11}$) | **126.09 ms** | 142.84 ms | 142.55 ms | 0.88x (MLX +14%) | 240.84 ms | **1.69x Faster** |
+| **2048** | Aligned (2^11) | **126.09 ms** | 142.84 ms | 142.55 ms | 0.88x (MLX +14%) | 240.84 ms | **1.69x Faster** |
 
 *Numerical precision: MaxDiff ≤ 0.0020 vs CPU gold reference, 0 NaN/Inf.*
 

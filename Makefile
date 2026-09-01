@@ -2,7 +2,7 @@ CXX = clang++
 CXXFLAGS = -O3 -std=c++17 -Wall
 FRAMEWORKS = -framework Metal -framework Foundation -framework MetalPerformanceShaders
 
-TARGETS = bench_m4 micro_bench pipelined_bench flash_attn_bench unified_prefill_engine thermal_stress_test
+TARGETS = bench_m4 micro_bench pipelined_bench flash_attn_bench unified_prefill_engine thermal_stress_test bench_8b_engine
 
 all: $(TARGETS)
 
@@ -20,6 +20,9 @@ flash_attn_bench: flash_attn_bench.mm flash_attn_kernels.metal
 
 unified_prefill_engine: unified_prefill_engine.mm unified_kernels.metal
 	$(CXX) $(CXXFLAGS) $(FRAMEWORKS) -o unified_prefill_engine unified_prefill_engine.mm
+
+bench_8b_engine: bench_8b_engine.mm unified_8b_kernels.metal
+	$(CXX) $(CXXFLAGS) $(FRAMEWORKS) -o bench_8b_engine bench_8b_engine.mm
 
 thermal_stress_test: thermal_stress_test.mm unified_kernels.metal
 	$(CXX) $(CXXFLAGS) $(FRAMEWORKS) -o thermal_stress_test thermal_stress_test.mm

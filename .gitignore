@@ -5,6 +5,7 @@ pipelined_bench
 flash_attn_bench
 unified_prefill_engine
 thermal_stress_test
+bench_8b_engine
 *.o
 *.dylib
 *.air

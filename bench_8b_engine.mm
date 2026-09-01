@@ -242,6 +242,13 @@ struct LayerProfile {
 // ============================================================================
 // MAIN UNIFIED 8B PREFILL ENGINE BENCHMARK
 // ============================================================================
+// M3 Ultra port: select the simdgroup_matrix attention kernel. Set M3_SG_ATTN=0
+// to fall back to the upstream scalar kernel (kept as required by the port plan).
+static bool sg_attn_enabled() {
+    const char* e = getenv("M3_SG_ATTN");
+    return !(e && e[0] == '0');
+}
+
 int main(int argc, const char* argv[]) {
     @autoreleasepool {
         std::cout << "==========================================================================================" << std::endl;
@@ -325,7 +332,11 @@ int main(int argc, const char* argv[]) {
         id<MTLComputePipelineState> pso_pipe_gemm_32x32     = load_pso(@"pipe_gemm_q4_0_32x32");
         id<MTLComputePipelineState> pso_pipe_qkv_head       = load_pso(@"pipe_qkv_head_gemm_q4_0");
         id<MTLComputePipelineState> pso_fused_gate_up       = load_pso(@"fused_gate_up_swiglu_q4_0");
-        id<MTLComputePipelineState> pso_flash_attn_fp16     = load_pso(@"flash_attn_fp16_causal_d128");
+        id<MTLComputePipelineState> pso_flash_attn_fp16     = load_pso(
+            sg_attn_enabled() ? @"flash_attn_sg_causal_d128" : @"flash_attn_fp16_causal_d128");
+        std::cout << "[+] FP16 attention kernel: "
+                  << (sg_attn_enabled() ? "simdgroup_matrix (M3 Ultra port)" : "scalar half4 (upstream M4)")
+                  << std::endl;
         id<MTLComputePipelineState> pso_flash_attn_q8_0     = load_pso(@"flash_attn_q8_0_causal_d128");
         id<MTLComputePipelineState> pso_quantize_kv_q8_0    = load_pso(@"quantize_kv_to_q8_0");
         id<MTLComputePipelineState> pso_swiglu              = load_pso(@"swiglu_activation");
@@ -455,9 +466,10 @@ int main(int argc, const char* argv[]) {
                 [enc setBytes:&M length:sizeof(uint32_t) atIndex:4];
                 [enc setBytes:&H length:sizeof(uint32_t) atIndex:5];
                 [enc setBytes:&attn_scale length:sizeof(float) atIndex:6];
-                [enc setThreadgroupMemoryLength:16384 atIndex:0];
+                [enc setThreadgroupMemoryLength:(sg_attn_enabled() ? 20480 : 16384) atIndex:0];
                 MTLSize grid_fa = MTLSizeMake((M + 31) / 32, H, 1);
-                [enc dispatchThreadgroups:grid_fa threadsPerThreadgroup:tg_size_32];
+                [enc dispatchThreadgroups:grid_fa
+                    threadsPerThreadgroup:(sg_attn_enabled() ? MTLSizeMake(128, 1, 1) : tg_size_32)];
 
                 // Stage C: O-Projection [M, ATTN_DIM] -> [M, K]
                 [enc setComputePipelineState:pso_pipe_gemm_32x32];

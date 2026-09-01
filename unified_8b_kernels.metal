@@ -1197,3 +1197,207 @@ kernel void naive_attn_pv(
 
     O[(head * M + row_q) * D + d_idx] = (half)acc;
 }
+
+// ============================================================================
+// M3 ULTRA PORT: simdgroup_matrix causal FlashAttention, D=128
+// ----------------------------------------------------------------------------
+// Why this exists (measured on an 80-core M3 Ultra, see M3_ULTRA_FINDINGS.md):
+// flash_attn_fp16_causal_d128 runs at 8% of the 24.8 TFLOP/s ceiling. It is not
+// bandwidth bound (the whole engine touches 0.2% of 694 GB/s) -- it is occupancy
+// bound. That kernel gives one query row to one thread, which costs ~128 registers
+// per thread (q_reg[32] + o_acc[32] as half4) and dispatches 32-thread threadgroups
+// holding 16 KB of threadgroup memory. At M=2048 that is 65,536 threads against
+// ~80k thread slots: the machine is filled once, with zero latency hiding.
+//
+// This version, same math and same layouts:
+//   * 128 threads (4 simdgroups) per threadgroup, 8 query rows per simdgroup
+//   * Q/K^T and P/V matmuls on the matrix units instead of scalar half4 FMA
+//   * ~55 registers/thread instead of ~128, 20 KB threadgroup memory for 4x
+//     the threads (5 KB per 32 threads vs 16 KB)
+//   * float accumulators for O instead of half -- strictly better fidelity than
+//     the original, which accumulated the output in half throughout
+// The online-softmax algebra, the -1e30 sentinel handling and the [M, H*D] output
+// layout are deliberately identical to the original so the two are comparable.
+// ============================================================================
+kernel void flash_attn_sg_causal_d128(
+    device const half* Q     [[buffer(0)]], // [H, M, 128]
+    device const half* K     [[buffer(1)]], // [H, M, 128]
+    device const half* V     [[buffer(2)]], // [H, M, 128]
+    device half*       O     [[buffer(3)]], // [M, H * 128]
+    constant uint&     M     [[buffer(4)]],
+    constant uint&     H     [[buffer(5)]],
+    constant float&    scale [[buffer(6)]],
+    threadgroup half*  shmem [[threadgroup(0)]], // 20480 B
+    uint2 tg_pos [[threadgroup_position_in_grid]],
+    uint  tid    [[thread_index_in_threadgroup]],
+    uint  sg_id  [[simdgroup_index_in_threadgroup]],
+    uint  lane   [[thread_index_in_simdgroup]])
+{
+    constexpr ushort BR  = 32;   // query rows per threadgroup
+    constexpr ushort BC  = 16;   // key columns per tile
+    constexpr ushort NSG = 4;    // simdgroups per threadgroup
+    constexpr ushort TGS = 128;  // threads per threadgroup
+    constexpr ushort DB  = 16;   // 128 dims / 8
+    constexpr ushort CB  = BC/8; // 2 key blocks
+
+    // --- threadgroup memory map (halves) ---------------------------------
+    // [    0, 4096) smQ : BR*128 half   (reused after the loop as O staging)
+    // [ 4096, 6144) smK : BC*128 half
+    // [ 6144, 8192) smV : BC*128 half
+    // [ 8192, 9216) smS : NSG*8*BC float
+    // [ 9216, 9728) smP : NSG*8*BC half
+    // [ 9728,10240) smA : NSG*64  float  (per-simdgroup diag(alpha))
+    threadgroup half*  smQ = shmem;
+    threadgroup half*  smK = shmem + 4096;
+    threadgroup half*  smV = shmem + 6144;
+    threadgroup float* smS = (threadgroup float*)(shmem + 8192);
+    threadgroup half*  smP = (threadgroup half*)(shmem + 9216);
+    threadgroup float* smA = (threadgroup float*)(shmem + 9728);
+
+    threadgroup float* myS = smS + sg_id * (8 * BC);
+    threadgroup half*  myP = smP + sg_id * (8 * BC);
+    threadgroup float* myA = smA + sg_id * 64;
+
+    const uint b_r  = tg_pos.x;
+    const uint h    = tg_pos.y;
+    const uint row0 = b_r * BR + sg_id * 8;
+
+    // --- stage Q (bounds-checked; out-of-range rows are zeroed) -----------
+    for (uint i = tid; i < (BR * 128) / 4; i += TGS) {
+        uint row = i >> 5, cv = i & 31;
+        uint g   = b_r * BR + row;
+        threadgroup half4* qd = (threadgroup half4*)(smQ + row * 128);
+        qd[cv] = (g < M) ? ((device const half4*)(Q + (h * M + g) * 128))[cv] : half4(0.0h);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    simdgroup_half8x8 qm[DB];
+    #pragma unroll
+    for (ushort d = 0; d < DB; d++) {
+        simdgroup_load(qm[d], smQ, 128, ulong2(d * 8, sg_id * 8));
+    }
+
+    simdgroup_float8x8 om[DB];
+    #pragma unroll
+    for (ushort n = 0; n < DB; n++) {
+        om[n] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
+    }
+
+    // one query row per 4 lanes; 4 of BC=16 columns each
+    const ushort r   = lane >> 2;
+    const ushort c0  = (lane & 3) << 2;
+    const uint row_idx = row0 + r;
+    float run_max = -1e30f;
+    float run_sum = 0.0f;
+
+    // threadgroup-uniform causal bound (identical to the scalar kernel)
+    const uint r_max      = min((b_r + 1) * BR, M) - 1;
+    const uint loop_tiles = min(r_max / BC + 1, (M + BC - 1) / BC);
+
+    for (uint b_c = 0; b_c < loop_tiles; b_c++) {
+        // ---- cooperative K/V tile load ----
+        uint c_start = b_c * BC;
+        for (uint i = tid; i < (BC * 128) / 4; i += TGS) {
+            uint row = i >> 5, cv = i & 31;
+            uint tok = c_start + row;
+            threadgroup half4* kd = (threadgroup half4*)(smK + row * 128);
+            threadgroup half4* vd = (threadgroup half4*)(smV + row * 128);
+            if (tok < M) {
+                kd[cv] = ((device const half4*)(K + (h * M + tok) * 128))[cv];
+                vd[cv] = ((device const half4*)(V + (h * M + tok) * 128))[cv];
+            } else {
+                kd[cv] = half4(0.0h);
+                vd[cv] = half4(0.0h);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // ---- S = Q * K^T on the matrix units ----
+        #pragma unroll
+        for (ushort cb = 0; cb < CB; cb++) {
+            simdgroup_float8x8 sm = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
+            #pragma unroll
+            for (ushort d = 0; d < DB; d++) {
+                simdgroup_half8x8 kt;
+                simdgroup_load(kt, smK, 128, ulong2(d * 8, cb * 8), true); // K^T block
+                simdgroup_multiply_accumulate(sm, qm[d], kt, sm);
+            }
+            simdgroup_store(sm, myS, BC, ulong2(cb * 8, 0));
+        }
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+
+        // ---- online softmax, 4 lanes per query row ----
+        float v[4];
+        #pragma unroll
+        for (ushort k = 0; k < 4; k++) {
+            ushort c = c0 + k;
+            uint col = b_c * BC + c;
+            v[k] = (col <= row_idx && col < M) ? myS[r * BC + c] * scale : -1e30f;
+        }
+        float m = max(max(v[0], v[1]), max(v[2], v[3]));
+        m = max(m, simd_shuffle_xor(m, 1u));
+        m = max(m, simd_shuffle_xor(m, 2u));
+
+        float new_max = max(run_max, m);
+        float alpha   = (run_max > -1e20f) ? exp(run_max - new_max) : 0.0f;
+
+        float ps = 0.0f;
+        #pragma unroll
+        for (ushort k = 0; k < 4; k++) {
+            float p = (v[k] > -1e20f) ? exp(v[k] - new_max) : 0.0f;
+            ps += p;
+            myP[r * BC + c0 + k] = (half)p;
+        }
+        ps += simd_shuffle_xor(ps, 1u);
+        ps += simd_shuffle_xor(ps, 2u);
+
+        run_sum = run_sum * alpha + ps;
+        run_max = new_max;
+
+        if ((lane & 3) == 0) {
+            #pragma unroll
+            for (ushort j = 0; j < 8; j++) myA[r * 8 + j] = (j == r) ? alpha : 0.0f;
+        }
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+
+        // ---- O = diag(alpha) * O + P * V ----
+        simdgroup_float8x8 am;
+        simdgroup_load(am, myA, 8);
+        #pragma unroll
+        for (ushort n = 0; n < DB; n++) {
+            simdgroup_float8x8 t;
+            simdgroup_multiply(t, am, om[n]);
+            om[n] = t;
+        }
+        #pragma unroll
+        for (ushort cb = 0; cb < CB; cb++) {
+            simdgroup_half8x8 pm;
+            simdgroup_load(pm, myP, BC, ulong2(cb * 8, 0));
+            #pragma unroll
+            for (ushort n = 0; n < DB; n++) {
+                simdgroup_half8x8 vb;
+                simdgroup_load(vb, smV, 128, ulong2(n * 8, cb * 8));
+                simdgroup_multiply_accumulate(om[n], pm, vb, om[n]);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    // ---- normalise and write out; smQ/smK/smV are dead, reuse as float staging
+    threadgroup float* smOut = (threadgroup float*)shmem + sg_id * (8 * 128);
+    #pragma unroll
+    for (ushort n = 0; n < DB; n++) {
+        simdgroup_store(om[n], smOut, 128, ulong2(n * 8, 0));
+    }
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (ushort i = 0; i < 8; i++) {
+        uint row = row0 + i;
+        if (row >= M) break;
+        float s   = simd_shuffle(run_sum, i * 4);
+        float inv = (s > 0.0f) ? (1.0f / s) : 0.0f;
+        device half* dst = O + row * (H * 128) + h * 128;
+        threadgroup const float* src = smOut + i * 128;
+        for (ushort d = lane; d < 128; d += 32) dst[d] = (half)(src[d] * inv);
+    }
+}

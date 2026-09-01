@@ -97,3 +97,120 @@ If you want to discuss Metal optimization, Apple Silicon memory hierarchies, or 
 
 *   **X (Twitter):** [Mohammed Hossam (@MohamedHz72007)](https://x.com/MohamedHz72007)
 *   **GitHub:** [mohamedhossammohamed](https://github.com/mohamedhossammohamed)
+
+---
+
+## M3 Ultra Support & Tuning Notes
+
+This section documents a port of the 8B prefill path to the **Apple M3 Ultra** (80-core GPU,
+256 GB unified, macOS 26.5.1, Metal 4). The M4 path is unchanged and still selectable.
+
+### Why the M4 tuning does not transfer
+
+The upstream kernels are tuned for a chip where memory is the binding constraint. On an
+M3 Ultra it is not, and the measurements are not close:
+
+| | measured on this machine |
+|---|---|
+| memory bandwidth ceiling | **694 GB/s** (87% of ~800 theoretical) |
+| bandwidth the engine actually used | **1.5 GB/s — 0.2% of it** |
+| FP16 / Q4 GEMM reference (MLX, same shapes) | **24.8 TFLOP/s** |
+| upstream causal attention | **2.0 TFLOP/s — 8% of that** |
+| upstream fused MLP | 10.5 TFLOP/s — 42% |
+
+Every kernel was compute- and occupancy-limited, not bandwidth-limited. The specific cause
+is that all GEMM and attention kernels dispatch **32-thread threadgroups** (one SIMD group)
+and give one output column, or one query row, to a single thread. In attention that costs
+~128 registers per thread and 16 KB of threadgroup memory, so at M=2048 the dispatch is
+65,536 threads against ~80,000 thread slots: the machine fills exactly once, with no
+latency hiding.
+
+### What changed
+
+All four stages moved to `simdgroup_matrix` with 128-thread (4 simdgroup) threadgroups:
+
+| new kernel | replaces | note |
+|---|---|---|
+| `flash_attn_sg_causal_d128` | `flash_attn_fp16_causal_d128` | 8 query rows per simdgroup, float O accumulators |
+| `flash_attn_sg_q8_0_causal_d128` | `flash_attn_q8_0_causal_d128` | same body, different tile loader |
+| `sg_gemm_q4_0` | `pipe_gemm_q4_0_32x32` | BN=64, BK=32 (one q4_0 block per step) |
+| `sg_gemm_q4_0_fused_swiglu` | `fused_gate_up_swiglu_q4_0` | 32-row tile; see the fusion note below |
+| `sg_qkv_head_gemm_q4_0` | `pipe_qkv_head_gemm_q4_0` | same body with a `[H, M, D]` scatter epilogue |
+
+The two attention kernels and the four GEMM kernels are each **one templated body**; upstream
+shipped them as separate near-identical copies.
+
+### Results — 8B shapes, M=2048, one layer, GPU timestamps
+
+| stage | upstream on this machine | ported | speedup |
+|---|---|---|---|
+| QKV projections (x3) | 12.418 ms | **9.527** | 1.30x |
+| causal attention (FP16 KV) | 17.24 ms | **1.576** | 10.9x |
+| causal attention (Q8_0 KV) | 17.27 ms | **1.354** | 12.8x |
+| output projection | 4.19 ms | **3.245** | 1.29x |
+| MLP SwiGLU + down | 60.26 ms | **33.424** | 1.80x |
+| **total / layer** | **94.15 ms** | **47.62** | **1.98x** |
+| 32-layer prefill | 3013 ms | **1524 ms** | 1.98x |
+| throughput | 21,752 tok/s | **43,011 tok/s** | |
+
+Against the engine's own baseline kernels the ratio goes from 1.19x to **2.35x**. Against a
+cold MLX reference for the same layer (44.43 ms) the engine moves from 47% to **93%**.
+
+### The two findings worth carrying upstream
+
+**1. The gate/up fusion is a net loss on a wide chip.** Simply *unfusing* the existing
+`fused_gate_up_swiglu_q4_0` -- dispatching `pipe_gemm_q4_0_32x32` twice plus the existing
+`swiglu_activation`, no new kernel code -- is worth **1.63x** (45.86 -> 28.15 ms at M=2048).
+The fusion saves one memory pass worth ~0.4 ms here and pays `acc_g[32] + acc_u[32]` = 64
+float accumulator registers per thread, worth ~17 ms.
+
+**2. The Q8_0 KV cache never paid off before.** Upstream, Q8_0 attention cost 17.27 ms
+against FP16's 17.24 ms -- halving the KV cache bought nothing, because the kernel was not
+waiting on bytes. After the port it is 1.354 vs 1.576 ms, so the memory saving is finally
+real and the feature earns its accuracy cost.
+
+### Numerical fidelity improved
+
+The scalar kernels sum partial products in `half` before promoting to `float`; the matrix
+units accumulate in `float` throughout. Every residual got smaller:
+
+| check | upstream | ported |
+|---|---|---|
+| engine gate, FP16 KV, M=512 | 0.00195 | **0.00098** |
+| engine gate, Q8_0 KV, M=1024 | 0.02344 | **0.01562** |
+| engine gate RMSE, M=128 | 0.00011 | **0.00007** |
+| isolated attention vs CPU FP32, M=2048 | 0.02344 (published) | **0.00034** |
+| isolated Q4_0 GEMM vs CPU FP32 | 0.00013-0.00085 | **0.00005-0.00035** |
+
+Cosine similarity 1.000000, zero NaN/Inf, bit-identical across repeated runs, verified at
+sequence lengths 1, 33, 63, 64, 65, 127, 128, 129, 255, 512, 1023, 1024, 2047, 2048, 4096, 8192.
+
+### Building and running
+
+```
+make                      # no Xcode needed; shaders compile at runtime from source
+./bench_8b_engine         # full 8B engine, ported kernels (default)
+./attn_sg_bench           # isolated attention A/B + CPU FP32 reference
+./mlp_bench               # isolated MLP A/B (fused/unfused, scalar/simdgroup) + CPU reference
+```
+
+Fall back to the upstream kernels at runtime, one axis at a time:
+
+```
+M3_SG_ATTN=0 ./bench_8b_engine     # upstream scalar attention
+M3_SG_GEMM=0 ./bench_8b_engine     # upstream scalar GEMMs
+M3_SG_ATTN=0 M3_SG_GEMM=0 ./bench_8b_engine   # fully upstream
+```
+
+### Limitations
+
+* Only the **8B path** (`unified_8b_kernels.metal` + `bench_8b_engine`) is ported. The 1B
+  path and the `micro_bench` / `pipelined_bench` / `flash_attn_bench` / `thermal_stress_test`
+  harnesses still use `unified_kernels.metal` and are untouched.
+* Diagnosis used achieved-throughput-vs-reference plus source analysis, **not** Xcode GPU
+  counters -- the Metal Debugger needs full Xcode, and this machine has Command Line Tools
+  only. Occupancy claims are inferred from register/threadgroup-memory arithmetic and
+  confirmed by the resulting speedups, not read off a counter.
+* The new kernels are **not double-buffered**; the upstream ones were. Occupancy provides
+  the latency hiding instead. Re-adding double buffering is untested headroom.
+* MLP is still ~11% behind MLX, the largest remaining per-stage gap.

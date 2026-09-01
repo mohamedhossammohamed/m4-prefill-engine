@@ -1226,7 +1226,8 @@ int main(int argc, const char* argv[]) {
         // EXECUTIVE SUMMARY TABLE
         // ====================================================================
         std::cout << "\n=================================================================================================================" << std::endl;
-        std::cout << "        EXECUTIVE SUMMARY: UNIFIED 8B PREFILL ENGINE vs LLAMA.CPP BASELINE ON APPLE M4 (16GB)                   " << std::endl;
+        std::cout << "        EXECUTIVE SUMMARY: UNIFIED 8B PREFILL ENGINE vs LLAMA.CPP-STYLE BASELINE ON APPLE M4 (16GB)              \n";
+        std::cout << "        Baseline: llama.cpp-style baseline (in-house Metal reimplementation of ggml mul_mm, calibrated ~8-10 TFLOPS on M4)\n";
         std::cout << "=================================================================================================================" << std::endl;
         std::cout << std::left << std::setw(10) << "Prompt M"
                   << std::right << std::setw(14) << "Base (ms/l)"
@@ -1236,7 +1237,7 @@ int main(int argc, const char* argv[]) {
                   << std::setw(14) << "Speedup Q8"
                   << std::setw(16) << "1L Tput FP16"
                   << std::setw(16) << "32L Tput FP16"
-                  << std::setw(15) << "32L Time"
+                  << std::setw(15) << "Full-Model Est"
                   << std::setw(14) << "DRAM BW" << std::endl;
         std::cout << std::string(143, '=') << std::endl;
 

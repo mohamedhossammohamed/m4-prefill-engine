@@ -1,0 +1,45 @@
+========================================================================================
+ CONFIG:
+   - Model Tier:         8B Transformer
+   - Hidden Dimension K: 4096
+   - Attention Heads H:  32
+   - Head Dimension D:   128
+   - Intermediate MLP N: 14336
+   - Layer Count L:      32 layers
+   - Sequence Length M:  512 tokens
+   - Quantization:       Q4_0 weights (130.50 MB/layer, 4.08 GB total)
+   - Baseline Kernel:    llamacpp_style_mul_mm_q4_0
+   - Baseline Identity:  llama.cpp-style baseline (in-house Metal reimplementation of ggml mul_mm, calibrated ~8-10 TFLOPS on M4)
+========================================================================================
+
+[DISCLOSURE BLOCK]
+All cross-engine numbers use synthetic in-UMA weights with exact model shapes, no disk I/O, no tokenizer (M is the token count), prefill-only (single forward pass, no generation). This measures kernel execution on identical workloads, not end-to-end product latency.
+
+[1] NUMERICAL ACCURACY VERIFICATION (GPU vs CPU Gold Reference):
+    - CPU Reference Execution Time: 16110.79 ms
+    - Max Absolute Difference:     0.003174 (Threshold: <= 0.050000)
+    - Mean Absolute Error (MAE):    0.000071
+    - Root Mean Square Error (RMSE):0.000142
+    - Numerical Stability Status:   VERIFIED (Zero NaN/Inf)
+
+[2] COMPONENT LATENCY BREAKDOWN (Median [Min - Max] over 20 iterations):
+    +---------------------------+----------------------------------------------------+-----------------------+----------------------------------------------------+
+    | Pipeline Stage            | llama.cpp-style baseline (in-house Metal ggml)     | Unified Opt (FP16 KV) | Unified Opt (Q8_0 KV) [custom-only feature]        |
+    +---------------------------+----------------------------------------------------+-----------------------+----------------------------------------------------+
+    | 1. QKV Projections        |                                31.33 [31.33-45.51] |   31.33 [25.26-31.33] |                                31.33 [25.63-31.58] |
+    | 2. Causal Attention       |                                11.05 [11.05-12.93] |    11.05 [8.56-11.05] |                                 11.05 [8.87-11.05] |
+    | 3. Output Proj & Residual |                                10.70 [10.70-15.71] |    10.70 [8.69-10.70] |                                 10.70 [8.80-10.91] |
+    | 4. MLP SwiGLU Stage       |                             141.29 [139.28-165.44] | 141.29 [114.98-141.29] |                             141.29 [117.81-141.29] |
+    +---------------------------+----------------------------------------------------+-----------------------+----------------------------------------------------+
+    | TOTAL 1-LAYER (Wall-Clock)|                             216.23 [195.20-235.17] | 163.95 [155.56-179.16] |                             168.60 [151.69-192.37] |
+    | TOTAL 1-LAYER (GPU-only)  |                             215.87 [194.89-234.79] | 163.59 [155.24-178.84] |                             168.19 [151.37-192.02] |
+    +---------------------------+----------------------------------------------------+-----------------------+----------------------------------------------------+
+
+[3] THROUGHPUT & SYSTEM METRICS (Shared Timing Method: Wall-Clock around commit+waitUntilCompleted):
+    - 1-Layer Latency (Wall-Clock):  Baseline=216.23 ms [195.20-235.17] | Opt FP16=163.95 ms [155.56-179.16] (1.32x) | Opt Q8=168.60 ms [151.69-192.37] (1.28x)
+    - 1-Layer Latency (GPU-only):    Opt FP16 (GPU-only ours)=163.59 ms [155.24-178.84] | Opt Q8 (GPU-only ours)=168.19 ms [151.37-192.02]
+    - 1-Layer Throughput:            Baseline=2368 tok/s | Opt FP16=3123 tok/s | Opt Q8=3037 tok/s
+    - Full-Model Estimate (32L): Baseline=6.92 s | Opt FP16=5.25 s | Opt Q8=5.40 s
+    - Full-Model Estimate Throughput:Baseline=74 tok/s | Opt FP16=98 tok/s | Opt Q8=95 tok/s
+    - Effective DRAM Bandwidth:      0.8 GB/s (0.7% of 120 GB/s peak)
+    - Note on Q8_0 KV:               custom-only feature (MLX path runs FP16 KV); not part of the cross-engine comparison.

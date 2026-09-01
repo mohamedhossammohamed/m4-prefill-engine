@@ -1,0 +1,45 @@
+========================================================================================
+ CONFIG:
+   - Model Tier:         8B Transformer
+   - Hidden Dimension K: 4096
+   - Attention Heads H:  32
+   - Head Dimension D:   128
+   - Intermediate MLP N: 14336
+   - Layer Count L:      32 layers
+   - Sequence Length M:  1024 tokens
+   - Quantization:       Q4_0 weights (130.50 MB/layer, 4.08 GB total)
+   - Baseline Kernel:    llamacpp_style_mul_mm_q4_0
+   - Baseline Identity:  llama.cpp-style baseline (in-house Metal reimplementation of ggml mul_mm, calibrated ~8-10 TFLOPS on M4)
+========================================================================================
+
+[DISCLOSURE BLOCK]
+All cross-engine numbers use synthetic in-UMA weights with exact model shapes, no disk I/O, no tokenizer (M is the token count), prefill-only (single forward pass, no generation). This measures kernel execution on identical workloads, not end-to-end product latency.
+
+[1] NUMERICAL ACCURACY VERIFICATION (GPU vs CPU Gold Reference):
+    - CPU Reference Execution Time: 35025.39 ms
+    - Max Absolute Difference:     0.002930 (Threshold: <= 0.050000)
+    - Mean Absolute Error (MAE):    0.000060
+    - Root Mean Square Error (RMSE):0.000124
+    - Numerical Stability Status:   VERIFIED (Zero NaN/Inf)
+
+[2] COMPONENT LATENCY BREAKDOWN (Median [Min - Max] over 20 iterations):
+    +---------------------------+----------------------------------------------------+-----------------------+----------------------------------------------------+
+    | Pipeline Stage            | llama.cpp-style baseline (in-house Metal ggml)     | Unified Opt (FP16 KV) | Unified Opt (Q8_0 KV) [custom-only feature]        |
+    +---------------------------+----------------------------------------------------+-----------------------+----------------------------------------------------+
+    | 1. QKV Projections        |                               51.60 [51.60-108.07] |   51.60 [51.60-67.87] |                                51.60 [51.60-64.47] |
+    | 2. Causal Attention       |                                31.82 [31.82-59.60] |   31.82 [30.91-40.98] |                                31.82 [31.82-38.93] |
+    | 3. Output Proj & Residual |                                17.04 [17.04-40.19] |   17.04 [16.85-20.03] |                                17.04 [17.04-22.62] |
+    | 4. MLP SwiGLU Stage       |                             232.85 [232.85-414.28] | 232.85 [226.31-264.01] |                             232.85 [232.85-273.35] |
+    +---------------------------+----------------------------------------------------+-----------------------+----------------------------------------------------+
+    | TOTAL 1-LAYER (Wall-Clock)|                             455.40 [419.07-510.27] | 359.64 [319.66-416.52] |                             353.19 [320.84-392.59] |
+    | TOTAL 1-LAYER (GPU-only)  |                             453.91 [418.76-504.97] | 359.32 [319.33-416.17] |                             352.77 [320.54-388.95] |
+    +---------------------------+----------------------------------------------------+-----------------------+----------------------------------------------------+
+
+[3] THROUGHPUT & SYSTEM METRICS (Shared Timing Method: Wall-Clock around commit+waitUntilCompleted):
+    - 1-Layer Latency (Wall-Clock):  Baseline=455.40 ms [419.07-510.27] | Opt FP16=359.64 ms [319.66-416.52] (1.27x) | Opt Q8=353.19 ms [320.84-392.59] (1.29x)
+    - 1-Layer Latency (GPU-only):    Opt FP16 (GPU-only ours)=359.32 ms [319.33-416.17] | Opt Q8 (GPU-only ours)=352.77 ms [320.54-388.95]
+    - 1-Layer Throughput:            Baseline=2249 tok/s | Opt FP16=2847 tok/s | Opt Q8=2899 tok/s
+    - Full-Model Estimate (32L): Baseline=14.57 s | Opt FP16=11.51 s | Opt Q8=11.30 s
+    - Full-Model Estimate Throughput:Baseline=70 tok/s | Opt FP16=89 tok/s | Opt Q8=91 tok/s
+    - Effective DRAM Bandwidth:      0.4 GB/s (0.3% of 120 GB/s peak)
+    - Note on Q8_0 KV:               custom-only feature (MLX path runs FP16 KV); not part of the cross-engine comparison.

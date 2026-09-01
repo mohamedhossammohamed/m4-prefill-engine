@@ -1,0 +1,45 @@
+========================================================================================
+ CONFIG:
+   - Model Tier:         16B Transformer
+   - Hidden Dimension K: 5120
+   - Attention Heads H:  40
+   - Head Dimension D:   128
+   - Intermediate MLP N: 13824
+   - Layer Count L:      48 layers
+   - Sequence Length M:  2048 tokens
+   - Quantization:       Q4_0 weights (170.16 MB/layer, 7.98 GB total)
+   - Baseline Kernel:    llamacpp_style_mul_mm_q4_0
+   - Baseline Identity:  llama.cpp-style baseline (in-house Metal reimplementation of ggml mul_mm, calibrated ~8-10 TFLOPS on M4)
+========================================================================================
+
+[DISCLOSURE BLOCK]
+All cross-engine numbers use synthetic in-UMA weights with exact model shapes, no disk I/O, no tokenizer (M is the token count), prefill-only (single forward pass, no generation). This measures kernel execution on identical workloads, not end-to-end product latency.
+
+[1] NUMERICAL ACCURACY VERIFICATION (GPU vs CPU Gold Reference):
+    - CPU Reference Execution Time: 82492.49 ms
+    - Max Absolute Difference:     0.003906 (Threshold: <= 0.050000)
+    - Mean Absolute Error (MAE):    0.000065
+    - Root Mean Square Error (RMSE):0.000131
+    - Numerical Stability Status:   VERIFIED (Zero NaN/Inf)
+
+[2] COMPONENT LATENCY BREAKDOWN (Median [Min - Max] over 20 iterations):
+    +---------------------------+----------------------------------------------------+-----------------------+----------------------------------------------------+
+    | Pipeline Stage            | llama.cpp-style baseline (in-house Metal ggml)     | Unified Opt (FP16 KV) | Unified Opt (Q8_0 KV) [custom-only feature]        |
+    +---------------------------+----------------------------------------------------+-----------------------+----------------------------------------------------+
+    | 1. QKV Projections        |                             181.26 [181.26-306.84] | 181.26 [163.13-181.26] |                             181.26 [181.26-181.26] |
+    | 2. Causal Attention       |                             165.43 [165.43-213.37] | 165.43 [154.87-165.43] |                             165.43 [165.43-165.43] |
+    | 3. Output Proj & Residual |                                56.67 [56.67-79.88] |   56.67 [55.89-56.67] |                                56.67 [56.67-56.67] |
+    | 4. MLP SwiGLU Stage       |                             618.25 [618.25-712.70] | 618.25 [607.14-618.25] |                             618.25 [618.25-618.25] |
+    +---------------------------+----------------------------------------------------+-----------------------+----------------------------------------------------+
+    | TOTAL 1-LAYER (Wall-Clock)|                          1346.02 [1285.81-1450.88] | 931.29 [880.06-1067.77] |                            980.92 [923.93-1044.83] |
+    | TOTAL 1-LAYER (GPU-only)  |                          1333.56 [1273.88-1429.65] | 930.93 [879.74-1067.45] |                            979.89 [923.31-1043.79] |
+    +---------------------------+----------------------------------------------------+-----------------------+----------------------------------------------------+
+
+[3] THROUGHPUT & SYSTEM METRICS (Shared Timing Method: Wall-Clock around commit+waitUntilCompleted):
+    - 1-Layer Latency (Wall-Clock):  Baseline=1346.02 ms [1285.81-1450.88] | Opt FP16=931.29 ms [880.06-1067.77] (1.45x) | Opt Q8=980.92 ms [923.93-1044.83] (1.37x)
+    - 1-Layer Latency (GPU-only):    Opt FP16 (GPU-only ours)=930.93 ms [879.74-1067.45] | Opt Q8 (GPU-only ours)=979.89 ms [923.31-1043.79]
+    - 1-Layer Throughput:            Baseline=1522 tok/s | Opt FP16=2199 tok/s | Opt Q8=2088 tok/s
+    - Full-Model Estimate (48L): Baseline=64.61 s | Opt FP16=44.70 s | Opt Q8=47.08 s
+    - Full-Model Estimate Throughput:Baseline=32 tok/s | Opt FP16=46 tok/s | Opt Q8=43 tok/s
+    - Effective DRAM Bandwidth:      0.2 GB/s (0.2% of 120 GB/s peak)
+    - Note on Q8_0 KV:               custom-only feature (MLX path runs FP16 KV); not part of the cross-engine comparison.

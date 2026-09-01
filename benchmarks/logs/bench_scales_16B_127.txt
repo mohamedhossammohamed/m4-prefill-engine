@@ -1,0 +1,45 @@
+========================================================================================
+ CONFIG:
+   - Model Tier:         16B Transformer
+   - Hidden Dimension K: 5120
+   - Attention Heads H:  40
+   - Head Dimension D:   128
+   - Intermediate MLP N: 13824
+   - Layer Count L:      48 layers
+   - Sequence Length M:  127 tokens
+   - Quantization:       Q4_0 weights (170.16 MB/layer, 7.98 GB total)
+   - Baseline Kernel:    llamacpp_style_mul_mm_q4_0
+   - Baseline Identity:  llama.cpp-style baseline (in-house Metal reimplementation of ggml mul_mm, calibrated ~8-10 TFLOPS on M4)
+========================================================================================
+
+[DISCLOSURE BLOCK]
+All cross-engine numbers use synthetic in-UMA weights with exact model shapes, no disk I/O, no tokenizer (M is the token count), prefill-only (single forward pass, no generation). This measures kernel execution on identical workloads, not end-to-end product latency.
+
+[1] NUMERICAL ACCURACY VERIFICATION (GPU vs CPU Gold Reference):
+    - CPU Reference Execution Time: 5329.09 ms
+    - Max Absolute Difference:     0.005859 (Threshold: <= 0.050000)
+    - Mean Absolute Error (MAE):    0.000151
+    - Root Mean Square Error (RMSE):0.000267
+    - Numerical Stability Status:   VERIFIED (Zero NaN/Inf)
+
+[2] COMPONENT LATENCY BREAKDOWN (Median [Min - Max] over 20 iterations):
+    +---------------------------+----------------------------------------------------+-----------------------+----------------------------------------------------+
+    | Pipeline Stage            | llama.cpp-style baseline (in-house Metal ggml)     | Unified Opt (FP16 KV) | Unified Opt (Q8_0 KV) [custom-only feature]        |
+    +---------------------------+----------------------------------------------------+-----------------------+----------------------------------------------------+
+    | 1. QKV Projections        |                                12.27 [12.27-19.52] |   12.27 [10.04-12.50] |                                12.27 [10.28-12.27] |
+    | 2. Causal Attention       |                                   1.60 [1.28-2.03] |      1.60 [1.22-2.13] |                                   1.60 [1.32-1.92] |
+    | 3. Output Proj & Residual |                                   4.62 [4.62-6.72] |      4.62 [3.60-4.62] |                                   4.62 [3.73-4.62] |
+    | 4. MLP SwiGLU Stage       |                                38.94 [38.94-50.65] |   38.94 [36.98-42.37] |                                38.94 [36.18-38.94] |
+    +---------------------------+----------------------------------------------------+-----------------------+----------------------------------------------------+
+    | TOTAL 1-LAYER (Wall-Clock)|                                71.15 [66.03-77.88] |   56.43 [50.00-59.64] |                                54.87 [51.23-59.73] |
+    | TOTAL 1-LAYER (GPU-only)  |                                70.78 [65.60-77.41] |   56.08 [49.66-59.18] |                                54.48 [50.90-59.31] |
+    +---------------------------+----------------------------------------------------+-----------------------+----------------------------------------------------+
+
+[3] THROUGHPUT & SYSTEM METRICS (Shared Timing Method: Wall-Clock around commit+waitUntilCompleted):
+    - 1-Layer Latency (Wall-Clock):  Baseline=71.15 ms [66.03-77.88] | Opt FP16=56.43 ms [50.00-59.64] (1.26x) | Opt Q8=54.87 ms [51.23-59.73] (1.30x)
+    - 1-Layer Latency (GPU-only):    Opt FP16 (GPU-only ours)=56.08 ms [49.66-59.18] | Opt Q8 (GPU-only ours)=54.48 ms [50.90-59.31]
+    - 1-Layer Throughput:            Baseline=1785 tok/s | Opt FP16=2250 tok/s | Opt Q8=2315 tok/s
+    - Full-Model Estimate (48L): Baseline=3.42 s | Opt FP16=2.71 s | Opt Q8=2.63 s
+    - Full-Model Estimate Throughput:Baseline=37 tok/s | Opt FP16=47 tok/s | Opt Q8=48 tok/s
+    - Effective DRAM Bandwidth:      3.2 GB/s (2.6% of 120 GB/s peak)
+    - Note on Q8_0 KV:               custom-only feature (MLX path runs FP16 KV); not part of the cross-engine comparison.

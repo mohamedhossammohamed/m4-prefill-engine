@@ -1,0 +1,27 @@
+========================================================================================
+ MLX SYNTHETIC PREFILL BENCHMARK REPORT (APPLE M4 / MLX METAL)
+ Timing Method: Wall-Clock around mx.eval (Shared Parity Method)
+ Iterations:    10 Warmup / 20 Measured Runs
+========================================================================================
+
+[DISCLOSURE BLOCK]
+All cross-engine numbers use synthetic in-UMA weights with exact model shapes, no disk I/O, no tokenizer (M is the token count), prefill-only (single forward pass, no generation). This measures kernel execution on identical workloads, not end-to-end product latency.
+
+[1B] M=  33:     3.74 ms [  3.51-  3.95] |     8823 tok/s | Full (16L):   0.06 s
+[1B] M= 127:     6.48 ms [  6.25-  6.92] |    19594 tok/s | Full (16L):   0.10 s
+[1B] M= 128:     6.33 ms [  6.02-  6.70] |    20209 tok/s | Full (16L):   0.10 s
+[1B] M= 129:     8.24 ms [  8.09-  9.12] |    15661 tok/s | Full (16L):   0.13 s
+[1B] M= 512:    23.41 ms [ 22.90- 23.86] |    21874 tok/s | Full (16L):   0.37 s
+[1B] M=1023:    47.57 ms [ 46.01- 50.80] |    21507 tok/s | Full (16L):   0.76 s
+[1B] M=1024:    49.78 ms [ 47.71- 53.89] |    20571 tok/s | Full (16L):   0.80 s
+[1B] M=2047:   122.16 ms [110.80-145.38] |    16756 tok/s | Full (16L):   1.95 s
+[1B] M=2048:   126.09 ms [115.26-157.07] |    16242 tok/s | Full (16L):   2.02 s
+[8B] M=  33:    17.61 ms [ 17.01- 19.86] |     1874 tok/s | Full (32L):   0.56 s
+[8B] M= 127:    39.41 ms [ 38.61- 41.52] |     3223 tok/s | Full (32L):   1.26 s
+[8B] M= 128:    41.09 ms [ 33.42- 51.40] |     3115 tok/s | Full (32L):   1.31 s
+[8B] M= 129:    67.74 ms [ 64.25- 75.48] |     1904 tok/s | Full (32L):   2.17 s
+[8B] M= 512:   155.32 ms [144.09-171.74] |     3296 tok/s | Full (32L):   4.97 s
+[8B] M=1023:   329.61 ms [282.53-373.72] |     3104 tok/s | Full (32L):  10.55 s
+[8B] M=1024:   307.27 ms [282.29-367.09] |     3333 tok/s | Full (32L):   9.83 s
+[8B] M=2047:   640.67 ms [567.27-745.68] |     3195 tok/s | Full (32L):  20.50 s
+[8B] M=2048:   612.59 ms [543.43-726.53] |     3343 tok/s | Full (32L):  19.60 s

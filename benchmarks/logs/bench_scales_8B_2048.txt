@@ -1,0 +1,45 @@
+========================================================================================
+ CONFIG:
+   - Model Tier:         8B Transformer
+   - Hidden Dimension K: 4096
+   - Attention Heads H:  32
+   - Head Dimension D:   128
+   - Intermediate MLP N: 14336
+   - Layer Count L:      32 layers
+   - Sequence Length M:  2048 tokens
+   - Quantization:       Q4_0 weights (130.50 MB/layer, 4.08 GB total)
+   - Baseline Kernel:    llamacpp_style_mul_mm_q4_0
+   - Baseline Identity:  llama.cpp-style baseline (in-house Metal reimplementation of ggml mul_mm, calibrated ~8-10 TFLOPS on M4)
+========================================================================================
+
+[DISCLOSURE BLOCK]
+All cross-engine numbers use synthetic in-UMA weights with exact model shapes, no disk I/O, no tokenizer (M is the token count), prefill-only (single forward pass, no generation). This measures kernel execution on identical workloads, not end-to-end product latency.
+
+[1] NUMERICAL ACCURACY VERIFICATION (GPU vs CPU Gold Reference):
+    - CPU Reference Execution Time: 68228.98 ms
+    - Max Absolute Difference:     0.002930 (Threshold: <= 0.050000)
+    - Mean Absolute Error (MAE):    0.000052
+    - Root Mean Square Error (RMSE):0.000111
+    - Numerical Stability Status:   VERIFIED (Zero NaN/Inf)
+
+[2] COMPONENT LATENCY BREAKDOWN (Median [Min - Max] over 20 iterations):
+    +---------------------------+----------------------------------------------------+-----------------------+----------------------------------------------------+
+    | Pipeline Stage            | llama.cpp-style baseline (in-house Metal ggml)     | Unified Opt (FP16 KV) | Unified Opt (Q8_0 KV) [custom-only feature]        |
+    +---------------------------+----------------------------------------------------+-----------------------+----------------------------------------------------+
+    | 1. QKV Projections        |                             118.42 [118.42-204.39] | 118.42 [99.85-118.42] |                              118.42 [98.61-118.42] |
+    | 2. Causal Attention       |                             142.03 [142.03-209.37] | 142.03 [107.42-142.03] |                             142.03 [109.95-142.03] |
+    | 3. Output Proj & Residual |                                42.40 [42.40-62.95] |   42.40 [32.04-42.40] |                                42.40 [34.46-42.40] |
+    | 4. MLP SwiGLU Stage       |                             644.89 [574.70-652.40] | 644.89 [462.72-644.89] |                             644.89 [482.51-644.89] |
+    +---------------------------+----------------------------------------------------+-----------------------+----------------------------------------------------+
+    | TOTAL 1-LAYER (Wall-Clock)|                           1075.05 [956.30-1439.15] | 763.03 [711.79-994.23] |                             750.69 [704.71-907.67] |
+    | TOTAL 1-LAYER (GPU-only)  |                           1064.62 [941.42-1420.13] | 762.69 [711.49-993.01] |                             749.92 [704.05-902.38] |
+    +---------------------------+----------------------------------------------------+-----------------------+----------------------------------------------------+
+
+[3] THROUGHPUT & SYSTEM METRICS (Shared Timing Method: Wall-Clock around commit+waitUntilCompleted):
+    - 1-Layer Latency (Wall-Clock):  Baseline=1075.05 ms [956.30-1439.15] | Opt FP16=763.03 ms [711.79-994.23] (1.41x) | Opt Q8=750.69 ms [704.71-907.67] (1.43x)
+    - 1-Layer Latency (GPU-only):    Opt FP16 (GPU-only ours)=762.69 ms [711.49-993.01] | Opt Q8 (GPU-only ours)=749.92 ms [704.05-902.38]
+    - 1-Layer Throughput:            Baseline=1905 tok/s | Opt FP16=2684 tok/s | Opt Q8=2728 tok/s
+    - Full-Model Estimate (32L): Baseline=34.40 s | Opt FP16=24.42 s | Opt Q8=24.02 s
+    - Full-Model Estimate Throughput:Baseline=60 tok/s | Opt FP16=84 tok/s | Opt Q8=85 tok/s
+    - Effective DRAM Bandwidth:      0.2 GB/s (0.1% of 120 GB/s peak)
+    - Note on Q8_0 KV:               custom-only feature (MLX path runs FP16 KV); not part of the cross-engine comparison.

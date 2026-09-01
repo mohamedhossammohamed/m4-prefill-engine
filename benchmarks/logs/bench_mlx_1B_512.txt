@@ -1,0 +1,21 @@
+========================================================================================
+ CONFIG:
+   - Engine:             MLX (0.32.2)
+   - Model Tier:         1B Transformer
+   - Hidden Dimension K: 2048
+   - Attention Heads H:  32
+   - Head Dimension D:   64
+   - Intermediate MLP N: 5632
+   - Layer Count L:      16 layers
+   - Sequence Length M:  512 tokens
+   - Quantization:       Q4_0 weights (27.56 MB/layer)
+========================================================================================
+
+[DISCLOSURE BLOCK]
+All cross-engine numbers use synthetic in-UMA weights with exact model shapes, no disk I/O, no tokenizer (M is the token count), prefill-only (single forward pass, no generation). This measures kernel execution on identical workloads, not end-to-end product latency.
+
+[1] TIMING & PERFORMANCE METRICS (Median [Min - Max] over 20 iterations):
+    - 1-Layer Latency (Wall):     23.41 ms [22.90-23.86] ms
+    - 1-Layer Throughput:         21874 tok/s
+    - Full-Model Estimate (16L): 0.37 s
+    - Full-Model Estimate Tput:   1367 tok/s

@@ -1,0 +1,45 @@
+========================================================================================
+ CONFIG:
+   - Model Tier:         16B Transformer
+   - Hidden Dimension K: 5120
+   - Attention Heads H:  40
+   - Head Dimension D:   128
+   - Intermediate MLP N: 13824
+   - Layer Count L:      48 layers
+   - Sequence Length M:  1024 tokens
+   - Quantization:       Q4_0 weights (170.16 MB/layer, 7.98 GB total)
+   - Baseline Kernel:    llamacpp_style_mul_mm_q4_0
+   - Baseline Identity:  llama.cpp-style baseline (in-house Metal reimplementation of ggml mul_mm, calibrated ~8-10 TFLOPS on M4)
+========================================================================================
+
+[DISCLOSURE BLOCK]
+All cross-engine numbers use synthetic in-UMA weights with exact model shapes, no disk I/O, no tokenizer (M is the token count), prefill-only (single forward pass, no generation). This measures kernel execution on identical workloads, not end-to-end product latency.
+
+[1] NUMERICAL ACCURACY VERIFICATION (GPU vs CPU Gold Reference):
+    - CPU Reference Execution Time: 40548.94 ms
+    - Max Absolute Difference:     0.003906 (Threshold: <= 0.050000)
+    - Mean Absolute Error (MAE):    0.000075
+    - Root Mean Square Error (RMSE):0.000145
+    - Numerical Stability Status:   VERIFIED (Zero NaN/Inf)
+
+[2] COMPONENT LATENCY BREAKDOWN (Median [Min - Max] over 20 iterations):
+    +---------------------------+----------------------------------------------------+-----------------------+----------------------------------------------------+
+    | Pipeline Stage            | llama.cpp-style baseline (in-house Metal ggml)     | Unified Opt (FP16 KV) | Unified Opt (Q8_0 KV) [custom-only feature]        |
+    +---------------------------+----------------------------------------------------+-----------------------+----------------------------------------------------+
+    | 1. QKV Projections        |                               77.69 [77.69-150.75] |   77.69 [77.69-85.86] |                                77.69 [77.69-77.69] |
+    | 2. Causal Attention       |                                36.08 [36.08-61.32] |   36.08 [36.08-41.15] |                                36.08 [36.08-36.08] |
+    | 3. Output Proj & Residual |                                25.37 [25.37-45.73] |   25.37 [25.37-29.42] |                                25.37 [25.37-25.37] |
+    | 4. MLP SwiGLU Stage       |                             294.80 [294.80-335.15] | 294.80 [294.80-320.66] |                             294.80 [294.80-294.80] |
+    +---------------------------+----------------------------------------------------+-----------------------+----------------------------------------------------+
+    | TOTAL 1-LAYER (Wall-Clock)|                             603.97 [527.43-640.95] | 465.94 [397.12-494.78] |                             437.38 [406.08-487.76] |
+    | TOTAL 1-LAYER (GPU-only)  |                             603.35 [527.09-640.53] | 465.64 [396.72-494.40] |                             436.94 [405.76-487.38] |
+    +---------------------------+----------------------------------------------------+-----------------------+----------------------------------------------------+
+
+[3] THROUGHPUT & SYSTEM METRICS (Shared Timing Method: Wall-Clock around commit+waitUntilCompleted):
+    - 1-Layer Latency (Wall-Clock):  Baseline=603.97 ms [527.43-640.95] | Opt FP16=465.94 ms [397.12-494.78] (1.30x) | Opt Q8=437.38 ms [406.08-487.76] (1.38x)
+    - 1-Layer Latency (GPU-only):    Opt FP16 (GPU-only ours)=465.64 ms [396.72-494.40] | Opt Q8 (GPU-only ours)=436.94 ms [405.76-487.38]
+    - 1-Layer Throughput:            Baseline=1695 tok/s | Opt FP16=2198 tok/s | Opt Q8=2341 tok/s
+    - Full-Model Estimate (48L): Baseline=28.99 s | Opt FP16=22.37 s | Opt Q8=20.99 s
+    - Full-Model Estimate Throughput:Baseline=35 tok/s | Opt FP16=46 tok/s | Opt Q8=49 tok/s
+    - Effective DRAM Bandwidth:      0.4 GB/s (0.3% of 120 GB/s peak)
+    - Note on Q8_0 KV:               custom-only feature (MLX path runs FP16 KV); not part of the cross-engine comparison.

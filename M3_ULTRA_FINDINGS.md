@@ -166,3 +166,56 @@ unchanged, speed 12.9x on the stage.
 The Q8_0 KV-cache path (`flash_attn_q8_0_causal_d128`) is untouched and still on the scalar
 kernel: its attention stage is still 17.27 ms, so the Q8_0 pipeline is now the slower of the
 two (94.13 ms vs 78.40 ms). Same treatment applies to it.
+
+---
+
+# Phase 4a.2 — Q8_0 KV attention, and a deduplication
+
+Upstream shipped `flash_attn_fp16_causal_d128` and `flash_attn_q8_0_causal_d128` as two
+~150-line kernels whose bodies are byte-for-byte identical: the dequant happens in the tile
+loader, so everything downstream already operates on a plain `half` tile. The port collapses
+them into one `flash_attn_sg_impl<KV>` template with two `sga_load_kv` overloads picked by
+the KV pointer type. Net: one body to maintain, two entry points.
+
+The Q8_0 loader was also rewritten for the wider threadgroup -- upstream walks `BC*4 = 64`
+q8_0 blocks with 32 threads; at 128 threads that would leave half of them idle, so each block
+is split across 2 threads (16 values each) and all 128 participate.
+
+Refactor was proven neutral first: the FP16 A/B re-run gave identical max-abs at every
+sequence length (0.00034 at M=2048) with timings inside the IQR.
+
+## Full engine, 8B, M=2048, one layer
+
+| stage | baseline | before port | after port |
+|---|---|---|---|
+| QKV projections | 18.74 | 12.41 | 12.41 (untouched) |
+| **attention, FP16 KV** | 20.41 | 17.24 | **1.589 ms — 12.8x** |
+| **attention, Q8_0 KV** | 20.41 | 17.27 | **1.352 ms — 12.8x** |
+| output projection | 6.34 | 4.19 | 4.19 (untouched) |
+| MLP SwiGLU | 66.35 | 60.26 | 60.20 (untouched) |
+| **total/layer, FP16 KV** | 111.84 | 94.10 | **78.38 (1.20x)** |
+| **total/layer, Q8_0 KV** | 111.90 | 94.15 | **78.22 (1.20x)** |
+| 32-layer prefill, Q8_0 | 3579 ms | 3013 ms | **2503 ms** |
+| engine vs its own baseline | 1.00x | 1.19x | **1.43x** |
+| throughput | 18,312 tok/s | 21,752 tok/s | **26,182 tok/s** |
+
+Engine gate `[PASS]` at M=128/512/1024 on both paths, MaxDiff unchanged from the scalar
+kernels (FP16 0.00195/0.00195/0.00781, Q8_0 0.00305/0.00244/0.02344). The Q8_0 residual is
+the KV quantisation itself, not the attention arithmetic -- as expected, since the body is
+now literally the same code as the CPU-verified FP16 path.
+
+## The interesting result: the Q8_0 KV cache never actually paid off before
+
+Upstream, Q8_0 attention cost **17.27 ms** against FP16's **17.24 ms** -- halving the KV
+cache bought *nothing*. That is the signature of an occupancy-bound kernel: it was not
+waiting on bytes, so removing bytes changed nothing. After the port the same comparison is
+**1.352 ms vs 1.589 ms**, i.e. Q8_0 is now 15% faster than FP16 and the memory saving is
+finally real. The KV-quantisation feature only becomes worth its accuracy cost once the
+kernel is no longer stalled on occupancy.
+
+## A caveat on "% of roofline"
+The 24.8 TFLOP/s figure is an *achieved MLX GEMM* number, not a hardware peak. The warm
+in-pipeline attention (1.352 ms => ~25.8 TFLOP/s on executed causal FLOPs) sits slightly
+above it, which means the reference is a floor on the true ceiling rather than a wall. The
+honest roofline comparison remains the cold isolated measurement: 2.55 ms at M=2048, 54% of
+that reference, against 8% before, and 82% of a cold MLX `scaled_dot_product_attention`.

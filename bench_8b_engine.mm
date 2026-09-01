@@ -337,7 +337,8 @@ int main(int argc, const char* argv[]) {
         std::cout << "[+] FP16 attention kernel: "
                   << (sg_attn_enabled() ? "simdgroup_matrix (M3 Ultra port)" : "scalar half4 (upstream M4)")
                   << std::endl;
-        id<MTLComputePipelineState> pso_flash_attn_q8_0     = load_pso(@"flash_attn_q8_0_causal_d128");
+        id<MTLComputePipelineState> pso_flash_attn_q8_0     = load_pso(
+            sg_attn_enabled() ? @"flash_attn_sg_q8_0_causal_d128" : @"flash_attn_q8_0_causal_d128");
         id<MTLComputePipelineState> pso_quantize_kv_q8_0    = load_pso(@"quantize_kv_to_q8_0");
         id<MTLComputePipelineState> pso_swiglu              = load_pso(@"swiglu_activation");
         id<MTLComputePipelineState> pso_residual_add        = load_pso(@"vector_add_residual");
@@ -590,9 +591,10 @@ int main(int argc, const char* argv[]) {
                 [enc setBytes:&M length:sizeof(uint32_t) atIndex:4];
                 [enc setBytes:&H length:sizeof(uint32_t) atIndex:5];
                 [enc setBytes:&attn_scale length:sizeof(float) atIndex:6];
-                [enc setThreadgroupMemoryLength:16384 atIndex:0];
+                [enc setThreadgroupMemoryLength:(sg_attn_enabled() ? 20480 : 16384) atIndex:0];
                 MTLSize grid_fa_q8 = MTLSizeMake((M + 31) / 32, H, 1);
-                [enc dispatchThreadgroups:grid_fa_q8 threadsPerThreadgroup:tg_size_32];
+                [enc dispatchThreadgroups:grid_fa_q8
+                    threadsPerThreadgroup:(sg_attn_enabled() ? MTLSizeMake(128, 1, 1) : tg_size_32)];
 
                 // O-Projection & Residual
                 [enc setComputePipelineState:pso_pipe_gemm_32x32];

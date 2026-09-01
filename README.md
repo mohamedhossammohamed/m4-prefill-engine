@@ -89,11 +89,7 @@ Under the strict legal statutes of this unofficial license, the software is open
 
 ## A Note on Citations & Future Use
 
-I am currently an early career Physician [second year med student] (who is doing this for some reason he is not very sure of, yet), and building this engine has been a massive learning experience. 
-
-If the ideas, techniques, or specific hardware-level optimizations from this repository (such as the M4 LSU saturation methods, custom Q8_0 KV cache handling, or Metal-specific prefill routing) are adapted, ported to other silicon architectures (AMD/Nvidia/Intel), or used to improve decoding phases in other software, I humbly ask for a **visible citation, link, or mention** in your project's documentation, blog post, or research paper. 
-
-Any visibility that helps me grow and find my footing in the systems engineering community is deeply and genuinely appreciated. Thank you for reading, testing, and building.
+As an early career Physician [second year med student] (who is doing this for some reason he is not very sure of, yet), I'm open sourcing this as a baseline. If you use these Metal routing ideas in your own silicon/software, a citation or link back would mean the world to me!
 
 ## Contact & Discussion
 

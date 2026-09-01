@@ -304,3 +304,52 @@ Cold MLX reference for the same layer is 44.43 ms, so the engine is now at **88%
 from 47% at the start. The entire remaining gap is QKV: 12.42 ms against MLX's 9.20 ms.
 `pipe_qkv_head_gemm_q4_0` is the last scalar GEMM -- it writes directly into [H, M, D] head
 layout, which is why it was not covered by the generic replacement.
+
+---
+
+# Phase 4a.4 — QKV head-major projection (last scalar GEMM)
+
+`pipe_qkv_head_gemm_q4_0` is the same GEMM as the others but scatters its result into
+`[H, M, D]` head-major layout instead of `[M, N]`, which is the only reason the generic
+replacement did not already cover it. Rather than a fourth kernel, the epilogue became a
+template parameter: `sg_gemm_q4_0_impl<FUSED, BM, HEADOUT>` plus a `D_head` argument, and
+`sg_qkv_head_gemm_q4_0` is a five-line entry point. One body now serves all four call sites.
+
+QKV projections (3x, M=2048, K=4096, N=4096): **12.418 -> 9.527 ms, 1.30x**.
+Cold MLX for the same three GEMMs is 9.198 ms, so this is within 3.6% of MLX.
+
+# Final state — full engine, 8B, one layer
+
+| stage | baseline | untuned upstream | ported | vs upstream | cold MLX |
+|---|---|---|---|---|---|
+| QKV projections (x3) | 18.74 | 12.42 | **9.527** | 1.30x | 9.198 |
+| causal attention (FP16 KV) | 20.41 | 17.24 | **1.576** | 10.9x | 2.088 |
+| causal attention (Q8_0 KV) | 20.41 | 17.27 | **1.354** | 12.8x | - |
+| output projection | 6.34 | 4.19 | **3.245** | 1.29x | 3.051 |
+| MLP SwiGLU + down | 66.32 | 60.26 | **33.424** | 1.80x | 30.096 |
+| **total / layer (FP16 KV)** | 111.81 | 94.10 | **47.77** | **1.97x** | 44.43 |
+| **total / layer (Q8_0 KV)** | 111.90 | 94.15 | **47.62** | **1.98x** | - |
+| 32-layer prefill | 3578 ms | 3013 ms | **1524 ms** | 1.98x | - |
+| engine vs its own baseline | 1.00x | 1.19x | **2.35x** | | |
+| throughput | 18,316 tok/s | 21,752 tok/s | **43,011 tok/s** | | |
+
+Across the sequence sweep (ms/layer, Q8_0 path): M=33 9.14->3.76, M=127 10.57->4.92,
+M=129 12.60->5.24, M=512 25.02->13.11, M=1024 52.18->24.13, M=2048 111.90->47.59.
+
+**The engine is now at 93% of a cold MLX reference for the whole layer, from 47%.** Per
+stage it is within 3.6% (QKV), 6% (O-proj) and 11% (MLP) of MLX, and ahead on attention.
+
+## Fidelity moved the right way at every step
+Engine gate, `[PASS]` on both KV paths at all three verified lengths, and the residuals
+*shrank* as kernels were replaced, because the scalar kernels accumulated partial sums in
+`half` where the matrix units accumulate in `float`:
+
+| | untuned upstream | ported |
+|---|---|---|
+| FP16 KV, M=128 / 512 / 1024 | 0.00195 / 0.00195 / 0.00781 | 0.00195 / **0.00098** / 0.00781 |
+| Q8_0 KV, M=128 / 512 / 1024 | 0.00305 / 0.00244 / 0.02344 | **0.00293** / 0.00244 / **0.01562** |
+| FP16 KV RMSE, M=128 | 0.00011 | **0.00007** |
+
+Threshold is 0.05. Isolated CPU-FP32 checks: attention max-abs 0.00034 at M=2048 (plan bar
+0.03) across 12 sequence lengths including 1/33/127/129/255/2047, bit-identical across runs;
+GEMM max-abs 0.00005-0.00035, 2.5-3x tighter than upstream.

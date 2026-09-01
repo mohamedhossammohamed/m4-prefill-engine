@@ -1523,13 +1523,14 @@ inline void sgg_load_b(device const block_q4_0* B, threadgroup half* smB,
     }
 }
 
-template <bool FUSED, ushort BM>
+template <bool FUSED, ushort BM, bool HEADOUT = false>
 inline void sg_gemm_q4_0_impl(
     device const half*       A,   // [M, K]
     device const block_q4_0* B0,  // [N, K/32]
     device const block_q4_0* B1,  // [N, K/32], gate/up second stream (FUSED only)
     device half*             C,   // [M, N]
     uint M, uint N, uint K,
+    uint D_head,                  // HEADOUT only: scatter to [H, M, D]
     threadgroup half* shmem,      // 16384 B
     uint2 tg_id, uint tid, uint sg_id, uint lane)
 {
@@ -1612,7 +1613,12 @@ inline void sg_gemm_q4_0_impl(
         if (gr < M && gn < N) {
             float v = st0[r * 16 + c];
             if (FUSED) v = (v / (1.0f + exp(-v))) * st1[r * 16 + c]; // SwiGLU
-            C[(ulong)gr * N + gn] = (half)v;
+            if (HEADOUT) {
+                // direct scatter to [H, M, D], matching pipe_qkv_head_gemm_q4_0
+                C[((ulong)(gn / D_head) * M + gr) * D_head + (gn % D_head)] = (half)v;
+            } else {
+                C[(ulong)gr * N + gn] = (half)v;
+            }
         }
     }
 }
@@ -1630,7 +1636,7 @@ kernel void sg_gemm_q4_0(
     uint  sg_id [[simdgroup_index_in_threadgroup]],
     uint  lane  [[thread_index_in_simdgroup]])
 {
-    sg_gemm_q4_0_impl<false, 64>(A, B, B, C, M, N, K, shmem, tg_id, tid, sg_id, lane);
+    sg_gemm_q4_0_impl<false, 64>(A, B, B, C, M, N, K, 0, shmem, tg_id, tid, sg_id, lane);
 }
 
 kernel void sg_gemm_q4_0_fused_swiglu(
@@ -1647,7 +1653,7 @@ kernel void sg_gemm_q4_0_fused_swiglu(
     uint  sg_id [[simdgroup_index_in_threadgroup]],
     uint  lane  [[thread_index_in_simdgroup]])
 {
-    sg_gemm_q4_0_impl<true, 32>(A, B_gate, B_up, C, M, N, K, shmem, tg_id, tid, sg_id, lane);
+    sg_gemm_q4_0_impl<true, 32>(A, B_gate, B_up, C, M, N, K, 0, shmem, tg_id, tid, sg_id, lane);
 }
 
 // Same fused kernel with a 64-row tile: halves the number of times each weight
@@ -1668,5 +1674,24 @@ kernel void sg_gemm_q4_0_fused_swiglu_bm64(
     uint  sg_id [[simdgroup_index_in_threadgroup]],
     uint  lane  [[thread_index_in_simdgroup]])
 {
-    sg_gemm_q4_0_impl<true, 64>(A, B_gate, B_up, C, M, N, K, shmem, tg_id, tid, sg_id, lane);
+    sg_gemm_q4_0_impl<true, 64>(A, B_gate, B_up, C, M, N, K, 0, shmem, tg_id, tid, sg_id, lane);
+}
+
+// Head-major QKV projection: same GEMM, epilogue scatters to [H, M, D] instead of
+// [M, N]. This is why the generic sg_gemm_q4_0 could not just be dropped in here.
+kernel void sg_qkv_head_gemm_q4_0(
+    device const half*       A [[buffer(0)]],
+    device const block_q4_0* B [[buffer(1)]],
+    device half*             C [[buffer(2)]], // [H, M, D]
+    constant uint&           M [[buffer(3)]],
+    constant uint&           H [[buffer(4)]],
+    constant uint&           D [[buffer(5)]],
+    constant uint&           K [[buffer(6)]],
+    threadgroup half*        shmem [[threadgroup(0)]],
+    uint2 tg_id [[threadgroup_position_in_grid]],
+    uint  tid   [[thread_index_in_threadgroup]],
+    uint  sg_id [[simdgroup_index_in_threadgroup]],
+    uint  lane  [[thread_index_in_simdgroup]])
+{
+    sg_gemm_q4_0_impl<false, 64, true>(A, B, B, C, M, H * D, K, D, shmem, tg_id, tid, sg_id, lane);
 }

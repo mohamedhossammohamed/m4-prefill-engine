@@ -336,7 +336,8 @@ int main(int argc, const char* argv[]) {
         // Optimized Engine Pipelines
         id<MTLComputePipelineState> pso_pipe_gemm_32x32     = load_pso(
             sg_gemm_enabled() ? @"sg_gemm_q4_0" : @"pipe_gemm_q4_0_32x32");
-        id<MTLComputePipelineState> pso_pipe_qkv_head       = load_pso(@"pipe_qkv_head_gemm_q4_0");
+        id<MTLComputePipelineState> pso_pipe_qkv_head       = load_pso(
+            sg_gemm_enabled() ? @"sg_qkv_head_gemm_q4_0" : @"pipe_qkv_head_gemm_q4_0");
         id<MTLComputePipelineState> pso_fused_gate_up       = load_pso(
             sg_gemm_enabled() ? @"sg_gemm_q4_0_fused_swiglu" : @"fused_gate_up_swiglu_q4_0");
         std::cout << "[+] Q4_0 GEMM kernels: "
@@ -441,10 +442,11 @@ int main(int argc, const char* argv[]) {
 
                 // Stage A: Direct Head QKV Projections [M, K] -> [H, M, D]
                 uint32_t qkv_N = ATTN_DIM;
-                NSUInteger tg_x = (qkv_N + 31) / 32;
-                NSUInteger tg_y = (M + 31) / 32;
+                NSUInteger tg_x = sg_gemm_enabled() ? (qkv_N + 63) / 64 : (qkv_N + 31) / 32;
+                NSUInteger tg_y = sg_gemm_enabled() ? (M + 63) / 64 : (M + 31) / 32;
                 MTLSize grid_qkv = MTLSizeMake(tg_x, tg_y, 1);
                 MTLSize tg_size_32 = MTLSizeMake(32, 1, 1);
+                MTLSize tg_qkv = sg_gemm_enabled() ? MTLSizeMake(128, 1, 1) : tg_size_32;
 
                 // Q Projection
                 [enc setComputePipelineState:pso_pipe_qkv_head];
@@ -455,18 +457,18 @@ int main(int argc, const char* argv[]) {
                 [enc setBytes:&H length:sizeof(uint32_t) atIndex:4];
                 [enc setBytes:&D length:sizeof(uint32_t) atIndex:5];
                 [enc setBytes:&K length:sizeof(uint32_t) atIndex:6];
-                [enc setThreadgroupMemoryLength:4096 atIndex:0];
-                [enc dispatchThreadgroups:grid_qkv threadsPerThreadgroup:tg_size_32];
+                [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 16384 : 4096) atIndex:0];
+                [enc dispatchThreadgroups:grid_qkv threadsPerThreadgroup:tg_qkv];
 
                 // K Projection
                 [enc setBuffer:d_W_k offset:0 atIndex:1];
                 [enc setBuffer:d_K offset:0 atIndex:2];
-                [enc dispatchThreadgroups:grid_qkv threadsPerThreadgroup:tg_size_32];
+                [enc dispatchThreadgroups:grid_qkv threadsPerThreadgroup:tg_qkv];
 
                 // V Projection
                 [enc setBuffer:d_W_v offset:0 atIndex:1];
                 [enc setBuffer:d_V offset:0 atIndex:2];
-                [enc dispatchThreadgroups:grid_qkv threadsPerThreadgroup:tg_size_32];
+                [enc dispatchThreadgroups:grid_qkv threadsPerThreadgroup:tg_qkv];
 
                 // Stage B: Fused FlashAttention FP16 (32x16 Tile) -> [M, H*D]
                 [enc setComputePipelineState:pso_flash_attn_fp16];
@@ -562,10 +564,11 @@ int main(int argc, const char* argv[]) {
 
                 // QKV Projections
                 uint32_t qkv_N = ATTN_DIM;
-                NSUInteger tg_x = (qkv_N + 31) / 32;
-                NSUInteger tg_y = (M + 31) / 32;
+                NSUInteger tg_x = sg_gemm_enabled() ? (qkv_N + 63) / 64 : (qkv_N + 31) / 32;
+                NSUInteger tg_y = sg_gemm_enabled() ? (M + 63) / 64 : (M + 31) / 32;
                 MTLSize grid_qkv = MTLSizeMake(tg_x, tg_y, 1);
                 MTLSize tg_size_32 = MTLSizeMake(32, 1, 1);
+                MTLSize tg_qkv = sg_gemm_enabled() ? MTLSizeMake(128, 1, 1) : tg_size_32;
 
                 [enc setComputePipelineState:pso_pipe_qkv_head];
                 [enc setBuffer:d_X_in offset:0 atIndex:0];
@@ -575,16 +578,16 @@ int main(int argc, const char* argv[]) {
                 [enc setBytes:&H length:sizeof(uint32_t) atIndex:4];
                 [enc setBytes:&D length:sizeof(uint32_t) atIndex:5];
                 [enc setBytes:&K length:sizeof(uint32_t) atIndex:6];
-                [enc setThreadgroupMemoryLength:4096 atIndex:0];
-                [enc dispatchThreadgroups:grid_qkv threadsPerThreadgroup:tg_size_32];
+                [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 16384 : 4096) atIndex:0];
+                [enc dispatchThreadgroups:grid_qkv threadsPerThreadgroup:tg_qkv];
 
                 [enc setBuffer:d_W_k offset:0 atIndex:1];
                 [enc setBuffer:d_K offset:0 atIndex:2];
-                [enc dispatchThreadgroups:grid_qkv threadsPerThreadgroup:tg_size_32];
+                [enc dispatchThreadgroups:grid_qkv threadsPerThreadgroup:tg_qkv];
 
                 [enc setBuffer:d_W_v offset:0 atIndex:1];
                 [enc setBuffer:d_V offset:0 atIndex:2];
-                [enc dispatchThreadgroups:grid_qkv threadsPerThreadgroup:tg_size_32];
+                [enc dispatchThreadgroups:grid_qkv threadsPerThreadgroup:tg_qkv];
 
                 // Quantize K & V to Q8_0 on-the-fly
                 uint32_t total_kv_blocks = (uint32_t)num_kv_blocks;
@@ -1019,12 +1022,13 @@ int main(int argc, const char* argv[]) {
                 };
 
                 MTLSize tg_size_32 = MTLSizeMake(32, 1, 1);
+                MTLSize tg_qkv = sg_gemm_enabled() ? MTLSizeMake(128, 1, 1) : tg_size_32;
 
                 // Stage A: QKV Projections (Direct Head Layout)
                 double t_qkv = time_encoder(^(id<MTLComputeCommandEncoder> enc) {
                     uint32_t qkv_N = ATTN_DIM;
-                    NSUInteger tg_x = (qkv_N + 31) / 32;
-                    NSUInteger tg_y = (M + 31) / 32;
+                    NSUInteger tg_x = sg_gemm_enabled() ? (qkv_N + 63) / 64 : (qkv_N + 31) / 32;
+                    NSUInteger tg_y = sg_gemm_enabled() ? (M + 63) / 64 : (M + 31) / 32;
                     MTLSize grid_qkv = MTLSizeMake(tg_x, tg_y, 1);
 
                     [enc setComputePipelineState:pso_pipe_qkv_head];
@@ -1035,16 +1039,16 @@ int main(int argc, const char* argv[]) {
                     [enc setBytes:&H length:sizeof(uint32_t) atIndex:4];
                     [enc setBytes:&D length:sizeof(uint32_t) atIndex:5];
                     [enc setBytes:&K length:sizeof(uint32_t) atIndex:6];
-                    [enc setThreadgroupMemoryLength:4096 atIndex:0];
-                    [enc dispatchThreadgroups:grid_qkv threadsPerThreadgroup:tg_size_32];
+                    [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 16384 : 4096) atIndex:0];
+                    [enc dispatchThreadgroups:grid_qkv threadsPerThreadgroup:tg_qkv];
 
                     [enc setBuffer:d_W_k offset:0 atIndex:1];
                     [enc setBuffer:d_K offset:0 atIndex:2];
-                    [enc dispatchThreadgroups:grid_qkv threadsPerThreadgroup:tg_size_32];
+                    [enc dispatchThreadgroups:grid_qkv threadsPerThreadgroup:tg_qkv];
 
                     [enc setBuffer:d_W_v offset:0 atIndex:1];
                     [enc setBuffer:d_V offset:0 atIndex:2];
-                    [enc dispatchThreadgroups:grid_qkv threadsPerThreadgroup:tg_size_32];
+                    [enc dispatchThreadgroups:grid_qkv threadsPerThreadgroup:tg_qkv];
 
                     if (is_q8) {
                         uint32_t total_kv_blocks = (uint32_t)num_kv_blocks;

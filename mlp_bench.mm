@@ -4,6 +4,18 @@
 // The unfused variants exist to settle the port plan's 4c question: is the M4-era
 // kernel fusion still a win on a chip where register pressure, not memory passes,
 // is the binding constraint?
+// ============================================================================
+// Part of the M3 Ultra port of the upstream m4-prefill-engine by Mohammed Hossam
+// (https://github.com/mohamedhossammohamed/m4-prefill-engine, commit ab01b63,
+// Copyright 2026 Mohammed Hossam, licensed under the Apache License 2.0).
+//
+// This file is new, authored in 2026 by MSW Lab AI, and is licensed under the
+// Apache License 2.0 to match the work it accompanies.
+//
+// Isolated A/B for the MLP path: fused vs unfused, scalar vs simdgroup, plus the
+// tile sweep, against a CPU FP32 gold reference.
+// ============================================================================
+
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <dispatch/dispatch.h>
@@ -75,6 +87,8 @@ int main(int argc, const char** argv) { @autoreleasepool {
     id<MTLComputePipelineState> P_gemm_g  = pso(@"sg_gemm_q4_0");
     id<MTLComputePipelineState> P_swiglu  = pso(@"swiglu_activation");
     id<MTLComputePipelineState> P_fused64 = pso(@"sg_gemm_q4_0_fused_swiglu_bm64");
+    id<MTLComputePipelineState> P_gemm_k64  = pso(@"sg_gemm_q4_0_bk64");
+    id<MTLComputePipelineState> P_fused_k64 = pso(@"sg_gemm_q4_0_fused_swiglu_bk64");
     id<MTLCommandQueue> q = [dev newCommandQueue];
     printf("device: %s\n", [[dev name] UTF8String]);
 
@@ -96,7 +110,7 @@ int main(int argc, const char** argv) { @autoreleasepool {
             [c setBuffer:A offset:0 atIndex:0]; [c setBuffer:b offset:0 atIndex:1];
             [c setBuffer:o offset:0 atIndex:2];
             [c setBytes:&M length:4 atIndex:3]; [c setBytes:&N length:4 atIndex:4]; [c setBytes:&K length:4 atIndex:5];
-            [c setThreadgroupMemoryLength:16384 atIndex:0];
+            [c setThreadgroupMemoryLength:8192 atIndex:0];   // smA 4K + smB 4K
             [c dispatchThreadgroups:MTLSizeMake((N+63)/64,(M+63)/64,1) threadsPerThreadgroup:MTLSizeMake(128,1,1)];
         };
         auto swig = [&]{
@@ -120,10 +134,24 @@ int main(int argc, const char** argv) { @autoreleasepool {
             [c setBuffer:A offset:0 atIndex:0]; [c setBuffer:Wg offset:0 atIndex:1];
             [c setBuffer:Wu offset:0 atIndex:2]; [c setBuffer:Out offset:0 atIndex:3];
             [c setBytes:&M length:4 atIndex:4]; [c setBytes:&N length:4 atIndex:5]; [c setBytes:&K length:4 atIndex:6];
-            [c setThreadgroupMemoryLength:16384 atIndex:0];
+            [c setThreadgroupMemoryLength:10240 atIndex:0];  // smA 2K + smB0 4K + smB1 4K
             [c dispatchThreadgroups:MTLSizeMake((N+63)/64,(M+31)/32,1) threadsPerThreadgroup:MTLSizeMake(128,1,1)];
         } else if (cfg == 3) {                // unfused simdgroup
             gemm_g(Wg, T0); gemm_g(Wu, T1); swig();
+        } else if (cfg == 7) {                // fused simdgroup, BK=64
+            [c setComputePipelineState:P_fused_k64];
+            [c setBuffer:A offset:0 atIndex:0]; [c setBuffer:Wg offset:0 atIndex:1];
+            [c setBuffer:Wu offset:0 atIndex:2]; [c setBuffer:Out offset:0 atIndex:3];
+            [c setBytes:&M length:4 atIndex:4]; [c setBytes:&N length:4 atIndex:5]; [c setBytes:&K length:4 atIndex:6];
+            [c setThreadgroupMemoryLength:20480 atIndex:0];
+            [c dispatchThreadgroups:MTLSizeMake((N+63)/64,(M+31)/32,1) threadsPerThreadgroup:MTLSizeMake(128,1,1)];
+        } else if (cfg == 8) {                // plain simdgroup, BK=64
+            [c setComputePipelineState:P_gemm_k64];
+            [c setBuffer:A offset:0 atIndex:0]; [c setBuffer:Wg offset:0 atIndex:1];
+            [c setBuffer:Out offset:0 atIndex:2];
+            [c setBytes:&M length:4 atIndex:3]; [c setBytes:&N length:4 atIndex:4]; [c setBytes:&K length:4 atIndex:5];
+            [c setThreadgroupMemoryLength:16384 atIndex:0];  // BK=64: smA 8K + smB 8K   // smA 4K + smB 4K
+            [c dispatchThreadgroups:MTLSizeMake((N+63)/64,(M+63)/64,1) threadsPerThreadgroup:MTLSizeMake(128,1,1)];
         } else if (cfg == 6) {                // fused simdgroup, 64-row tile
             [c setComputePipelineState:P_fused64];
             [c setBuffer:A offset:0 atIndex:0]; [c setBuffer:Wg offset:0 atIndex:1];
@@ -176,8 +204,8 @@ int main(int argc, const char** argv) { @autoreleasepool {
     }
 
     printf("\n=== TIMING at 8B shapes (GPU timestamps, median of 9 after 3 warmup) ===\n");
-    const char* names[7] = {"fused-scalar(upstream)","unfused-scalar","fused-simdgroup-bm32","unfused-simdgroup","down-scalar(upstream)","down-simdgroup","fused-simdgroup-bm64"};
-    for (uint M : {512u, 1024u, 2048u}) {
+    const char* names[9] = {"fused-scalar(upstream)","unfused-scalar","fused-sg BM32 BK32","unfused-simdgroup","down-scalar(upstream)","down-sg BM64 BK32","fused-sg BM64 BK32","fused-sg BM32 BK64","down-sg BM64 BK64"};
+    for (uint M : {2048u}) {
         for (int part = 0; part < 2; part++) {
             uint N = part ? 4096 : 14336, K = part ? 14336 : 4096;
             printf("\n-- %s  M=%u K=%u N=%u --\n", part?"DOWN PROJECTION":"GATE/UP + SwiGLU", M, K, N);
@@ -192,7 +220,7 @@ int main(int argc, const char** argv) { @autoreleasepool {
             prng = 1337;
             gen_act((__fp16*)A.contents, na);
             gen_w((block_q4_0*)Wg.contents, nw); gen_w((block_q4_0*)Wu.contents, nw);
-            int cfgs[2][5] = {{0,1,2,3,6},{4,5,-1,-1,-1}};
+            int cfgs[2][5] = {{0,2,3,7,-1},{4,5,8,-1,-1}};
             double base = 0;
             for (int ci = 0; ci < 5; ci++) {
                 int cfg = cfgs[part][ci];
@@ -203,7 +231,7 @@ int main(int argc, const char** argv) { @autoreleasepool {
                 for (int i = 0; i < 12; i++) { double a = run(M,N,K,cfg,A,Wg,Wu,T0,T1,out); if (i>=3) t.push_back(a); }
                 Stat s = stats(t);
                 if (ci == 0) base = s.med;
-                double flops = 2.0*M*N*K*((cfg==4||cfg==5)?1:2);
+                double flops = 2.0*M*N*K*((cfg==4||cfg==5||cfg==8)?1:2);
                 double maxd = 0;
                 if (ci > 0) {
                     const __fp16* a=(const __fp16*)Ob.contents; const __fp16* b=(const __fp16*)Oc.contents;

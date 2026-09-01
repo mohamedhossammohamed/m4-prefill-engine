@@ -2,6 +2,18 @@
 // Compares the upstream scalar kernel (flash_attn_fp16_causal_d128) against the
 // simdgroup_matrix port (flash_attn_sg_causal_d128): GPU-timestamp medians with
 // IQR, plus a CPU FP32 gold reference (max-abs + cosine similarity + NaN scan).
+// ============================================================================
+// Part of the M3 Ultra port of the upstream m4-prefill-engine by Mohammed Hossam
+// (https://github.com/mohamedhossammohamed/m4-prefill-engine, commit ab01b63,
+// Copyright 2026 Mohammed Hossam, licensed under the Apache License 2.0).
+//
+// This file is new, authored in 2026 by MSW Lab AI, and is licensed under the
+// Apache License 2.0 to match the work it accompanies.
+//
+// Isolated A/B for the causal FlashAttention kernel: GPU-timestamp medians with
+// IQR, CPU FP32 gold reference, cosine similarity, NaN scan, determinism check.
+// ============================================================================
+
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <dispatch/dispatch.h>
@@ -101,7 +113,7 @@ int main(int argc, const char** argv) { @autoreleasepool {
             [e setBuffer:bV offset:0 atIndex:2]; [e setBuffer:out offset:0 atIndex:3];
             [e setBytes:&M length:4 atIndex:4]; [e setBytes:&H length:4 atIndex:5];
             [e setBytes:&scale length:4 atIndex:6];
-            [e setThreadgroupMemoryLength:(isNew ? 20480 : 16384) atIndex:0];
+            [e setThreadgroupMemoryLength:(isNew ? 16384 : 16384) atIndex:0];
             [e dispatchThreadgroups:MTLSizeMake((M + 31) / 32, H, 1)
               threadsPerThreadgroup:MTLSizeMake(isNew ? 128 : 32, 1, 1)];
             [e endEncoding]; [cb commit]; [cb waitUntilCompleted];

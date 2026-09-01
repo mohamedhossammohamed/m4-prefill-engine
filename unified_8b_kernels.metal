@@ -1,3 +1,21 @@
+// ============================================================================
+// NOTICE -- Apache License 2.0, section 4(b): this file has been modified.
+//
+// Derived from the upstream m4-prefill-engine by Mohammed Hossam
+// (https://github.com/mohamedhossammohamed/m4-prefill-engine, commit ab01b63,
+// Copyright 2026 Mohammed Hossam, licensed under the Apache License 2.0).
+//
+// Modified in 2026 by MSW Lab AI to port the 8B prefill path to Apple M3 Ultra:
+//   ADDED: flash_attn_sg_causal_d128, flash_attn_sg_q8_0_causal_d128,
+//          sg_gemm_q4_0, sg_gemm_q4_0_fused_swiglu, sg_qkv_head_gemm_q4_0
+//          and the tile-sweep variants kept for reproducibility.
+//   UNCHANGED: every pre-existing kernel in this file.
+//
+// Every upstream kernel is retained unchanged and remains selectable at runtime
+// (M3_SG_ATTN=0, M3_SG_GEMM=0 restores upstream behaviour exactly).
+// See NOTICE and M3_ULTRA_FINDINGS.md for the full list of changes.
+// ============================================================================
+
 #include <metal_stdlib>
 using namespace metal;
 
@@ -1229,7 +1247,7 @@ constexpr constant ushort SGA_BC  = 16;   // key columns per tile
 constexpr constant ushort SGA_TGS = 128;  // threads per threadgroup (4 simdgroups)
 constexpr constant ushort SGA_DB  = 16;   // 128 dims / 8
 constexpr constant ushort SGA_CB  = SGA_BC / 8;
-constant uint SGA_SHMEM_BYTES = 20480;    // must match setThreadgroupMemoryLength
+constant uint SGA_SHMEM_BYTES = 16384;    // must match setThreadgroupMemoryLength
 
 // --- tile loaders: dequantise (if needed) into a plain half tile -------------
 inline void sga_load_kv(device const half* K, device const half* V,
@@ -1288,18 +1306,19 @@ inline void flash_attn_sg_impl(
     uint2 tg_pos, uint tid, uint sg_id, uint lane)
 {
     // --- threadgroup memory map (halves) ---------------------------------
-    // [    0, 4096) smQ : BR*128 half   (reused after the loop as O staging)
-    // [ 4096, 6144) smK : BC*128 half
-    // [ 6144, 8192) smV : BC*128 half
-    // [ 8192, 9216) smS : NSG*8*BC float
-    // [ 9216, 9728) smP : NSG*8*BC half
-    // [ 9728,10240) smA : NSG*64  float  (per-simdgroup diag(alpha))
+    // Three phases share one 16 KB allocation, because threadgroup memory -- not
+    // barriers -- turned out to be the binding constraint on this chip (measured:
+    // every variant that raised it lost, every variant that lowered it won):
+    //   phase 1, Q staging   [0, 4096) = 8 KB   (dead once Q is in registers)
+    //   phase 2, the k-loop  [0, 6144) = 12 KB
+    //   phase 3, O staging   [0, 8192) = 16 KB  (as float)
+    // Laying phase 2 on top of phase 1 costs one extra barrier and 4 KB.
     threadgroup half*  smQ = shmem;
-    threadgroup half*  smK = shmem + 4096;
-    threadgroup half*  smV = shmem + 6144;
-    threadgroup float* smS = (threadgroup float*)(shmem + 8192);
-    threadgroup half*  smP = (threadgroup half*)(shmem + 9216);
-    threadgroup float* smA = (threadgroup float*)(shmem + 9728);
+    threadgroup half*  smK = shmem;
+    threadgroup half*  smV = shmem + 2048;
+    threadgroup float* smS = (threadgroup float*)(shmem + 4096);
+    threadgroup half*  smP = (threadgroup half*)(shmem + 5120);
+    threadgroup float* smA = (threadgroup float*)(shmem + 5632);
 
     threadgroup float* myS = smS + sg_id * (8 * SGA_BC);
     threadgroup half*  myP = smP + sg_id * (8 * SGA_BC);
@@ -1323,6 +1342,8 @@ inline void flash_attn_sg_impl(
     for (ushort d = 0; d < SGA_DB; d++) {
         simdgroup_load(qm[d], smQ, 128, ulong2(d * 8, sg_id * 8));
     }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);  // Q is in registers; smQ is now free
 
     simdgroup_float8x8 om[SGA_DB];
     #pragma unroll
@@ -1443,7 +1464,7 @@ kernel void flash_attn_sg_causal_d128(
     constant uint&     M     [[buffer(4)]],
     constant uint&     H     [[buffer(5)]],
     constant float&    scale [[buffer(6)]],
-    threadgroup half*  shmem [[threadgroup(0)]], // 20480 B
+    threadgroup half*  shmem [[threadgroup(0)]], // 16384 B
     uint2 tg_pos [[threadgroup_position_in_grid]],
     uint  tid    [[thread_index_in_threadgroup]],
     uint  sg_id  [[simdgroup_index_in_threadgroup]],
@@ -1500,15 +1521,18 @@ constexpr constant ushort SGG_KB  = 4;    // BK / 8
 
 // Dequantise BN q4_0 blocks (one per output column) into smB as [n][k].
 // k 0..15  = low nibble of qs[0..15];  k 16..31 = high nibble of qs[0..15].
+template <ushort BK>
 inline void sgg_load_b(device const block_q4_0* B, threadgroup half* smB,
-                       uint n_start, uint N, uint num_kb, uint kb, uint tid)
+                       uint n_start, uint N, uint num_kb, uint kb0, uint tid)
 {
-    for (uint u = tid; u < SGG_BN * 2; u += SGG_TGS) {
-        uint n = u >> 1, sel = u & 1;
+    constexpr ushort NBLK = BK / 32;  // q4_0 blocks per k-step
+    for (uint u = tid; u < SGG_BN * 2 * NBLK; u += SGG_TGS) {
+        uint t = u >> 1, sel = u & 1;
+        uint n = t / NBLK, sub = t % NBLK;
         uint gn = n_start + n;
-        threadgroup half* dst = smB + n * SGG_BK + sel * 16;
+        threadgroup half* dst = smB + n * BK + sub * 32 + sel * 16;
         if (gn < N) {
-            block_q4_0 blk = B[(ulong)gn * num_kb + kb];
+            block_q4_0 blk = B[(ulong)gn * num_kb + kb0 + sub];
             half d = blk.d;
             #pragma unroll
             for (ushort i = 0; i < 16; i++) {
@@ -1523,7 +1547,7 @@ inline void sgg_load_b(device const block_q4_0* B, threadgroup half* smB,
     }
 }
 
-template <bool FUSED, ushort BM, bool HEADOUT = false>
+template <bool FUSED, ushort BM, bool HEADOUT = false, ushort BK = 32>
 inline void sg_gemm_q4_0_impl(
     device const half*       A,   // [M, K]
     device const block_q4_0* B0,  // [N, K/32]
@@ -1541,8 +1565,8 @@ inline void sg_gemm_q4_0_impl(
     // [     +, +2048) smB1 (FUSED)
     // epilogue overlays from 0 with float staging (2 * NSG * BM*16 floats)
     threadgroup half* smA  = shmem;
-    threadgroup half* smB0 = shmem + BM * SGG_BK;
-    threadgroup half* smB1 = smB0 + SGG_BN * SGG_BK;
+    threadgroup half* smB0 = shmem + BM * BK;
+    threadgroup half* smB1 = smB0 + SGG_BN * BK;
 
     const uint m_start = tg_id.y * BM;
     const uint n_start = tg_id.x * SGG_BN;
@@ -1559,31 +1583,31 @@ inline void sg_gemm_q4_0_impl(
         }
     }
 
-    for (uint kb = 0; kb < num_kb; kb++) {
-        // A tile [BM, 32]
-        for (uint i = tid; i < (BM * SGG_BK) / 4; i += SGG_TGS) {
-            uint r = i / (SGG_BK / 4), c4 = i % (SGG_BK / 4);
-            uint gr = m_start + r, gc = kb * SGG_BK + c4 * 4;
+    for (uint kb = 0; kb < num_kb; kb += BK / 32) {
+        // A tile [BM, BK]
+        for (uint i = tid; i < (BM * BK) / 4; i += SGG_TGS) {
+            uint r = i / (BK / 4), c4 = i % (BK / 4);
+            uint gr = m_start + r, gc = kb * 32 + c4 * 4;
             half4 val = half4(0.0h);
             if (gr < M && gc < K) val = *(device const half4*)(A + (ulong)gr * K + gc);
-            *(threadgroup half4*)(smA + r * SGG_BK + c4 * 4) = val;
+            *(threadgroup half4*)(smA + r * BK + c4 * 4) = val;
         }
-        sgg_load_b(B0, smB0, n_start, N, num_kb, kb, tid);
-        if (FUSED) sgg_load_b(B1, smB1, n_start, N, num_kb, kb, tid);
+        sgg_load_b<BK>(B0, smB0, n_start, N, num_kb, kb, tid);
+        if (FUSED) sgg_load_b<BK>(B1, smB1, n_start, N, num_kb, kb, tid);
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
         #pragma unroll
-        for (ushort k8 = 0; k8 < SGG_KB; k8++) {
+        for (ushort k8 = 0; k8 < BK / 8; k8++) {
             simdgroup_half8x8 bm0[SGG_NB], bm1[SGG_NB];
             #pragma unroll
             for (ushort nb = 0; nb < SGG_NB; nb++) {
-                simdgroup_load(bm0[nb], smB0, SGG_BK, ulong2(k8 * 8, n_base + nb * 8), true);
-                if (FUSED) simdgroup_load(bm1[nb], smB1, SGG_BK, ulong2(k8 * 8, n_base + nb * 8), true);
+                simdgroup_load(bm0[nb], smB0, BK, ulong2(k8 * 8, n_base + nb * 8), true);
+                if (FUSED) simdgroup_load(bm1[nb], smB1, BK, ulong2(k8 * 8, n_base + nb * 8), true);
             }
             #pragma unroll
             for (ushort mb = 0; mb < MB; mb++) {
                 simdgroup_half8x8 am;
-                simdgroup_load(am, smA, SGG_BK, ulong2(k8 * 8, mb * 8));
+                simdgroup_load(am, smA, BK, ulong2(k8 * 8, mb * 8));
                 #pragma unroll
                 for (ushort nb = 0; nb < SGG_NB; nb++) {
                     simdgroup_multiply_accumulate(acc0[mb][nb], am, bm0[nb], acc0[mb][nb]);
@@ -1594,30 +1618,34 @@ inline void sg_gemm_q4_0_impl(
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
-    // ---- epilogue: stage through threadgroup memory so the M/N tails can be masked
-    threadgroup float* st0 = (threadgroup float*)shmem + sg_id * (BM * 16);
-    threadgroup float* st1 = (threadgroup float*)shmem + SGG_NSG * (BM * 16) + sg_id * (BM * 16);
+    // ---- epilogue: stage through threadgroup memory so the M/N tails can be masked.
+    // Drained one 8-row block at a time. Staging the whole BM x 16 tile at once needed
+    // 16 KB, which exceeded the kernel's live working set and became the threadgroup-memory
+    // ceiling on occupancy; per-block draining needs 4 KB and costs MB extra simdgroup
+    // barriers, which run once per threadgroup rather than per k-step.
+    threadgroup float* st0 = (threadgroup float*)shmem + sg_id * (8 * 16);
+    threadgroup float* st1 = (threadgroup float*)shmem + SGG_NSG * (8 * 16) + sg_id * (8 * 16);
     #pragma unroll
     for (ushort mb = 0; mb < MB; mb++) {
+        simdgroup_barrier(mem_flags::mem_threadgroup);
         #pragma unroll
         for (ushort nb = 0; nb < SGG_NB; nb++) {
-            simdgroup_store(acc0[mb][nb], st0, 16, ulong2(nb * 8, mb * 8));
-            if (FUSED) simdgroup_store(acc1[mb][nb], st1, 16, ulong2(nb * 8, mb * 8));
+            simdgroup_store(acc0[mb][nb], st0, 16, ulong2(nb * 8, 0));
+            if (FUSED) simdgroup_store(acc1[mb][nb], st1, 16, ulong2(nb * 8, 0));
         }
-    }
-    simdgroup_barrier(mem_flags::mem_threadgroup);
-
-    for (uint idx = lane; idx < (uint)BM * 16; idx += 32) {
-        uint r = idx >> 4, c = idx & 15;
-        uint gr = m_start + r, gn = n_start + n_base + c;
-        if (gr < M && gn < N) {
-            float v = st0[r * 16 + c];
-            if (FUSED) v = (v / (1.0f + exp(-v))) * st1[r * 16 + c]; // SwiGLU
-            if (HEADOUT) {
-                // direct scatter to [H, M, D], matching pipe_qkv_head_gemm_q4_0
-                C[((ulong)(gn / D_head) * M + gr) * D_head + (gn % D_head)] = (half)v;
-            } else {
-                C[(ulong)gr * N + gn] = (half)v;
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint idx = lane; idx < 8 * 16; idx += 32) {
+            uint r = mb * 8 + (idx >> 4), c = idx & 15;
+            uint gr = m_start + r, gn = n_start + n_base + c;
+            if (gr < M && gn < N) {
+                float v = st0[idx];
+                if (FUSED) v = (v / (1.0f + exp(-v))) * st1[idx]; // SwiGLU
+                if (HEADOUT) {
+                    // direct scatter to [H, M, D], matching pipe_qkv_head_gemm_q4_0
+                    C[((ulong)(gn / D_head) * M + gr) * D_head + (gn % D_head)] = (half)v;
+                } else {
+                    C[(ulong)gr * N + gn] = (half)v;
+                }
             }
         }
     }
@@ -1694,4 +1722,38 @@ kernel void sg_qkv_head_gemm_q4_0(
     uint  lane  [[thread_index_in_simdgroup]])
 {
     sg_gemm_q4_0_impl<false, 64, true>(A, B, B, C, M, H * D, K, D, shmem, tg_id, tid, sg_id, lane);
+}
+
+// --- K-tile sweep variants (BK = 64: two q4_0 blocks per step, half the barriers) ---
+kernel void sg_gemm_q4_0_bk64(
+    device const half*       A [[buffer(0)]],
+    device const block_q4_0* B [[buffer(1)]],
+    device half*             C [[buffer(2)]],
+    constant uint&           M [[buffer(3)]],
+    constant uint&           N [[buffer(4)]],
+    constant uint&           K [[buffer(5)]],
+    threadgroup half*        shmem [[threadgroup(0)]],  // 16384 B
+    uint2 tg_id [[threadgroup_position_in_grid]],
+    uint  tid   [[thread_index_in_threadgroup]],
+    uint  sg_id [[simdgroup_index_in_threadgroup]],
+    uint  lane  [[thread_index_in_simdgroup]])
+{
+    sg_gemm_q4_0_impl<false, 64, false, 64>(A, B, B, C, M, N, K, 0, shmem, tg_id, tid, sg_id, lane);
+}
+
+kernel void sg_gemm_q4_0_fused_swiglu_bk64(
+    device const half*       A      [[buffer(0)]],
+    device const block_q4_0* B_gate [[buffer(1)]],
+    device const block_q4_0* B_up   [[buffer(2)]],
+    device half*             C      [[buffer(3)]],
+    constant uint&           M      [[buffer(4)]],
+    constant uint&           N      [[buffer(5)]],
+    constant uint&           K      [[buffer(6)]],
+    threadgroup half*        shmem  [[threadgroup(0)]],  // 20480 B
+    uint2 tg_id [[threadgroup_position_in_grid]],
+    uint  tid   [[thread_index_in_threadgroup]],
+    uint  sg_id [[simdgroup_index_in_threadgroup]],
+    uint  lane  [[thread_index_in_simdgroup]])
+{
+    sg_gemm_q4_0_impl<true, 32, false, 64>(A, B_gate, B_up, C, M, N, K, 0, shmem, tg_id, tid, sg_id, lane);
 }

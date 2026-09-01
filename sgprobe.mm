@@ -1,3 +1,14 @@
+// ============================================================================
+// Part of the M3 Ultra port of the upstream m4-prefill-engine by Mohammed Hossam
+// (https://github.com/mohamedhossammohamed/m4-prefill-engine, commit ab01b63,
+// Copyright 2026 Mohammed Hossam, licensed under the Apache License 2.0).
+//
+// This file is new, authored in 2026 by MSW Lab AI, and is licensed under the
+// Apache License 2.0 to match the work it accompanies.
+//
+// Compile-time capability probe for MSL simdgroup_matrix on the target device.
+// ============================================================================
+
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <cstdio>

@@ -1,3 +1,20 @@
+// ============================================================================
+// NOTICE -- Apache License 2.0, section 4(b): this file has been modified.
+//
+// Derived from the upstream m4-prefill-engine by Mohammed Hossam
+// (https://github.com/mohamedhossammohamed/m4-prefill-engine, commit ab01b63,
+// Copyright 2026 Mohammed Hossam, licensed under the Apache License 2.0).
+//
+// Modified in 2026 by MSW Lab AI to port the 8B prefill path to Apple M3 Ultra:
+//   ADDED: runtime kernel selection (M3_SG_ATTN / M3_SG_GEMM) and the dispatch
+//          geometry each selection requires (threadgroup size, threadgroup
+//          memory, grid). No upstream logic was removed.
+//
+// Every upstream kernel is retained unchanged and remains selectable at runtime
+// (M3_SG_ATTN=0, M3_SG_GEMM=0 restores upstream behaviour exactly).
+// See NOTICE and M3_ULTRA_FINDINGS.md for the full list of changes.
+// ============================================================================
+
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <dispatch/dispatch.h>
@@ -457,7 +474,7 @@ int main(int argc, const char* argv[]) {
                 [enc setBytes:&H length:sizeof(uint32_t) atIndex:4];
                 [enc setBytes:&D length:sizeof(uint32_t) atIndex:5];
                 [enc setBytes:&K length:sizeof(uint32_t) atIndex:6];
-                [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 16384 : 4096) atIndex:0];
+                [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 8192 : 4096) atIndex:0];
                 [enc dispatchThreadgroups:grid_qkv threadsPerThreadgroup:tg_qkv];
 
                 // K Projection
@@ -479,7 +496,7 @@ int main(int argc, const char* argv[]) {
                 [enc setBytes:&M length:sizeof(uint32_t) atIndex:4];
                 [enc setBytes:&H length:sizeof(uint32_t) atIndex:5];
                 [enc setBytes:&attn_scale length:sizeof(float) atIndex:6];
-                [enc setThreadgroupMemoryLength:(sg_attn_enabled() ? 20480 : 16384) atIndex:0];
+                [enc setThreadgroupMemoryLength:(16384) atIndex:0];
                 MTLSize grid_fa = MTLSizeMake((M + 31) / 32, H, 1);
                 [enc dispatchThreadgroups:grid_fa
                     threadsPerThreadgroup:(sg_attn_enabled() ? MTLSizeMake(128, 1, 1) : tg_size_32)];
@@ -492,7 +509,7 @@ int main(int argc, const char* argv[]) {
                 [enc setBytes:&M length:sizeof(uint32_t) atIndex:3];
                 [enc setBytes:&K length:sizeof(uint32_t) atIndex:4];
                 [enc setBytes:&ATTN_DIM length:sizeof(uint32_t) atIndex:5];
-                [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 16384 : 4096) atIndex:0];
+                [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 8192 : 4096) atIndex:0];
                 MTLSize grid_o = sg_gemm_enabled() ? MTLSizeMake((K + 63) / 64, (M + 63) / 64, 1)
                                                : MTLSizeMake((K + 31) / 32, (M + 31) / 32, 1);
                 [enc dispatchThreadgroups:grid_o
@@ -516,7 +533,7 @@ int main(int argc, const char* argv[]) {
                 [enc setBytes:&M length:sizeof(uint32_t) atIndex:4];
                 [enc setBytes:&N_MLP length:sizeof(uint32_t) atIndex:5];
                 [enc setBytes:&K length:sizeof(uint32_t) atIndex:6];
-                [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 16384 : 4096) atIndex:0];
+                [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 10240 : 4096) atIndex:0];
                 MTLSize grid_mlp_up = sg_gemm_enabled() ? MTLSizeMake((N_MLP + 63) / 64, (M + 31) / 32, 1)
                                                         : MTLSizeMake((N_MLP + 31) / 32, (M + 31) / 32, 1);
                 [enc dispatchThreadgroups:grid_mlp_up
@@ -530,7 +547,7 @@ int main(int argc, const char* argv[]) {
                 [enc setBytes:&M length:sizeof(uint32_t) atIndex:3];
                 [enc setBytes:&K length:sizeof(uint32_t) atIndex:4];
                 [enc setBytes:&N_MLP length:sizeof(uint32_t) atIndex:5];
-                [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 16384 : 4096) atIndex:0];
+                [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 8192 : 4096) atIndex:0];
                 MTLSize grid_down = sg_gemm_enabled() ? MTLSizeMake((K + 63) / 64, (M + 63) / 64, 1)
                                                : MTLSizeMake((K + 31) / 32, (M + 31) / 32, 1);
                 [enc dispatchThreadgroups:grid_down
@@ -578,7 +595,7 @@ int main(int argc, const char* argv[]) {
                 [enc setBytes:&H length:sizeof(uint32_t) atIndex:4];
                 [enc setBytes:&D length:sizeof(uint32_t) atIndex:5];
                 [enc setBytes:&K length:sizeof(uint32_t) atIndex:6];
-                [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 16384 : 4096) atIndex:0];
+                [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 8192 : 4096) atIndex:0];
                 [enc dispatchThreadgroups:grid_qkv threadsPerThreadgroup:tg_qkv];
 
                 [enc setBuffer:d_W_k offset:0 atIndex:1];
@@ -610,7 +627,7 @@ int main(int argc, const char* argv[]) {
                 [enc setBytes:&M length:sizeof(uint32_t) atIndex:4];
                 [enc setBytes:&H length:sizeof(uint32_t) atIndex:5];
                 [enc setBytes:&attn_scale length:sizeof(float) atIndex:6];
-                [enc setThreadgroupMemoryLength:(sg_attn_enabled() ? 20480 : 16384) atIndex:0];
+                [enc setThreadgroupMemoryLength:(16384) atIndex:0];
                 MTLSize grid_fa_q8 = MTLSizeMake((M + 31) / 32, H, 1);
                 [enc dispatchThreadgroups:grid_fa_q8
                     threadsPerThreadgroup:(sg_attn_enabled() ? MTLSizeMake(128, 1, 1) : tg_size_32)];
@@ -623,7 +640,7 @@ int main(int argc, const char* argv[]) {
                 [enc setBytes:&M length:sizeof(uint32_t) atIndex:3];
                 [enc setBytes:&K length:sizeof(uint32_t) atIndex:4];
                 [enc setBytes:&ATTN_DIM length:sizeof(uint32_t) atIndex:5];
-                [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 16384 : 4096) atIndex:0];
+                [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 8192 : 4096) atIndex:0];
                 MTLSize grid_o = sg_gemm_enabled() ? MTLSizeMake((K + 63) / 64, (M + 63) / 64, 1)
                                                : MTLSizeMake((K + 31) / 32, (M + 31) / 32, 1);
                 [enc dispatchThreadgroups:grid_o
@@ -646,7 +663,7 @@ int main(int argc, const char* argv[]) {
                 [enc setBytes:&M length:sizeof(uint32_t) atIndex:4];
                 [enc setBytes:&N_MLP length:sizeof(uint32_t) atIndex:5];
                 [enc setBytes:&K length:sizeof(uint32_t) atIndex:6];
-                [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 16384 : 4096) atIndex:0];
+                [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 10240 : 4096) atIndex:0];
                 MTLSize grid_mlp_up = sg_gemm_enabled() ? MTLSizeMake((N_MLP + 63) / 64, (M + 31) / 32, 1)
                                                         : MTLSizeMake((N_MLP + 31) / 32, (M + 31) / 32, 1);
                 [enc dispatchThreadgroups:grid_mlp_up
@@ -659,7 +676,7 @@ int main(int argc, const char* argv[]) {
                 [enc setBytes:&M length:sizeof(uint32_t) atIndex:3];
                 [enc setBytes:&K length:sizeof(uint32_t) atIndex:4];
                 [enc setBytes:&N_MLP length:sizeof(uint32_t) atIndex:5];
-                [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 16384 : 4096) atIndex:0];
+                [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 8192 : 4096) atIndex:0];
                 MTLSize grid_down = sg_gemm_enabled() ? MTLSizeMake((K + 63) / 64, (M + 63) / 64, 1)
                                                : MTLSizeMake((K + 31) / 32, (M + 31) / 32, 1);
                 [enc dispatchThreadgroups:grid_down
@@ -1039,7 +1056,7 @@ int main(int argc, const char* argv[]) {
                     [enc setBytes:&H length:sizeof(uint32_t) atIndex:4];
                     [enc setBytes:&D length:sizeof(uint32_t) atIndex:5];
                     [enc setBytes:&K length:sizeof(uint32_t) atIndex:6];
-                    [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 16384 : 4096) atIndex:0];
+                    [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 8192 : 4096) atIndex:0];
                     [enc dispatchThreadgroups:grid_qkv threadsPerThreadgroup:tg_qkv];
 
                     [enc setBuffer:d_W_k offset:0 atIndex:1];
@@ -1102,7 +1119,7 @@ int main(int argc, const char* argv[]) {
                     [enc setBytes:&M length:sizeof(uint32_t) atIndex:3];
                     [enc setBytes:&K length:sizeof(uint32_t) atIndex:4];
                     [enc setBytes:&ATTN_DIM length:sizeof(uint32_t) atIndex:5];
-                    [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 16384 : 4096) atIndex:0];
+                    [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 8192 : 4096) atIndex:0];
                     MTLSize grid_o = sg_gemm_enabled() ? MTLSizeMake((K + 63) / 64, (M + 63) / 64, 1)
                                                    : MTLSizeMake((K + 31) / 32, (M + 31) / 32, 1);
                     [enc dispatchThreadgroups:grid_o
@@ -1127,7 +1144,7 @@ int main(int argc, const char* argv[]) {
                     [enc setBytes:&M length:sizeof(uint32_t) atIndex:4];
                     [enc setBytes:&N_MLP length:sizeof(uint32_t) atIndex:5];
                     [enc setBytes:&K length:sizeof(uint32_t) atIndex:6];
-                    [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 16384 : 4096) atIndex:0];
+                    [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 10240 : 4096) atIndex:0];
                     MTLSize grid_mlp_up = sg_gemm_enabled() ? MTLSizeMake((N_MLP + 63) / 64, (M + 31) / 32, 1)
                                                             : MTLSizeMake((N_MLP + 31) / 32, (M + 31) / 32, 1);
                     [enc dispatchThreadgroups:grid_mlp_up
@@ -1140,7 +1157,7 @@ int main(int argc, const char* argv[]) {
                     [enc setBytes:&M length:sizeof(uint32_t) atIndex:3];
                     [enc setBytes:&K length:sizeof(uint32_t) atIndex:4];
                     [enc setBytes:&N_MLP length:sizeof(uint32_t) atIndex:5];
-                    [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 16384 : 4096) atIndex:0];
+                    [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 8192 : 4096) atIndex:0];
                     MTLSize grid_down = sg_gemm_enabled() ? MTLSizeMake((K + 63) / 64, (M + 63) / 64, 1)
                                                    : MTLSizeMake((K + 31) / 32, (M + 31) / 32, 1);
                     [enc dispatchThreadgroups:grid_down

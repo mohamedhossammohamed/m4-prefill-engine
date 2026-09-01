@@ -23,15 +23,16 @@ This engine replaces standard matrix multiplications and attention mechanisms wi
 *   **Fused FlashAttention & Q8_0 KV Cache:** Online running softmax in registers with causal triangular block skipping, paired with dynamic 8-bit KV caching to reduce memory footprint by ~47%.
 *   **Direct-Head SwiGLU Fusion:** Projecting activations directly into head-major formats and fusing the Gate/Up projections in registers, eliminating costly memory transpose kernels.
 
-#### Benchmarking Methodology & Disclosures
+#### Benchmarking Methodology, Disclosures & Baseline Standards
 
-> **[Disclosure Block]**  
-> All cross-engine numbers use synthetic in-UMA weights with exact model shapes, no disk I/O, no tokenizer (M is the token count), prefill-only (single forward pass, no generation). This measures kernel execution on identical workloads, not end-to-end product latency.
+> **[Disclosure & Baseline Standards]**  
+> All cross-engine numbers use synthetic in-UMA weights with exact model shapes, zero disk I/O, zero tokenizer overhead (where $M$ is the exact prompt token count), and prefill-only (single forward pass, no autoregressive generation). This isolates low-level kernel execution on identical physical tensor layouts.
 
-*   **Timing Parity:** In cross-engine comparisons, all engines are measured with the exact same method: wall-clock timing around `commit+waitUntilCompleted` for Metal and `mx.eval` for Apple MLX (v0.32.2). Native Metal `GPUStartTime` / `GPUEndTime` metrics are preserved as a dedicated `"GPU-only (ours)"` column.
+*   **Primary Baseline (Apple MLX):** **Apple MLX (v0.32.2)** is the official, primary baseline for this project. Early exploratory prototypes informally referenced application-level runtimes (such as Ollama); all such references have been retired in favor of Apple MLX to ensure strict, reproducible, and unimpeachable systems metrology. MLX represents the gold-standard native framework on Apple Silicon.
+*   **Secondary Reference Baseline (llama.cpp-Style):** An in-house Metal reimplementation of `ggml`'s `kernel_mul_mm_q4_0` matrix multiplication kernel from `llama.cpp` (calibrated at ~8–10 TFLOPS on M4) is provided as an open-source C++/Metal reference.
+*   **Strict Timing Parity:** All engines are measured with identical host-synchronized wall-clock timing: `commit` + `waitUntilCompleted` for Metal and `mx.eval` for Apple MLX. Pure hardware execution timestamps (`GPUStartTime` / `GPUEndTime`) are separated in a dedicated `"GPU-only (ours)"` column.
 *   **Variance & Sampling:** 10 warmup iterations (discarded) followed by 20 measured iterations across all sequence lengths, reporting median times and `[min – max]` distributions.
-*   **Baseline Identity:** The baseline is an in-house Metal reimplementation of `ggml`'s `kernel_mul_mm_q4_0` matrix multiplication kernel from `llama.cpp` (calibrated at ~8–10 TFLOPS on M4), allowing pure in-memory kernel benchmarking without disk artifact dependencies.
-*   **KV Cache:** Cross-engine comparisons run standard FP16 KV cache on all engines. Dynamic Q8_0 KV is a custom feature and explicitly noted where tested.
+*   **KV Cache Standard:** Headline cross-engine comparisons evaluate standard FP16 KV cache across all engines. Dynamic Q8_0 KV is a custom feature and explicitly noted where tested.
 
 ## ⚠️ Target Audience & Usage Disclaimer
 
@@ -41,15 +42,15 @@ It is **not** intended as a drop-in replacement for everyday `llama.cpp` users, 
 
 The goal of this repository is to provide a verified, open-source baseline for the community. It is intended for researchers and engineers studying Apple Silicon memory hierarchies, until these specific low-level optimizations can be upstreamed into mainstream frameworks (like `ggml-metal`) or adopted as specialized hardware configurations.
 
-## Cross-Engine Prefill Comparison (Apple MLX Baseline vs. Ours)
+## Cross-Engine Prefill Comparison: Apple MLX (Primary Baseline) vs. Ours
 
 To contextualize the engine's performance, we executed a head-to-head prefill-only benchmark across 1B and 8B Transformer architectures using identical synthetic weight topologies. All engines were measured using a strict shared wall-clock timing methodology (10 warmup iterations, 20 measurement iterations) to ensure absolute parity. **Apple MLX (v0.32.2)** serves as the primary baseline, alongside an in-house **llama.cpp-style Metal baseline** (`ggml mul_mm` calibrated at ~8–10 TFLOPS) for reference.
 
 ### The Architectural Trade-off: Aligned vs. Unaligned Boundaries
 The results highlight a fascinating physical trade-off on the M4 architecture:
-*   **vs. Apple MLX (Aligned Powers-of-2):** MLX's heavily optimized JIT compiler excels at perfectly aligned, power-of-2 dense matrix blocks ($M=512, 1024, 2048$), outperforming our engine by 14–31% on 1B shapes and long 8B batches.
-*   **vs. Apple MLX (Unaligned Edge Boundaries):** On arbitrary, real-world prompt boundaries (e.g., $M=128, 129$), our engine's custom Metal routing and direct-head projections eliminate dynamic padding and transposition overhead. This allows our engine to outperform MLX by up to **1.25x (+25%)** on unaligned 8B edge cases.
-*   **vs. llama.cpp-style reference:** Our custom engine delivers a consistent **1.19x to 1.76x speedup** across all scales and prompt boundaries, demonstrating the impact of 128-bit LSU saturation and fused dequantization.
+*   **vs. Apple MLX Baseline (Aligned Powers-of-2):** MLX's heavily optimized JIT compiler excels at perfectly aligned, power-of-2 dense matrix blocks ($M=512, 1024, 2048$), outperforming our engine by 14–31% on 1B shapes and long 8B batches.
+*   **vs. Apple MLX Baseline (Unaligned Edge Boundaries):** On arbitrary, real-world prompt boundaries (e.g., $M=128, 129$), our engine's custom Metal routing and direct-head projections eliminate dynamic padding and transposition overhead. This allows our engine to outperform MLX by up to **1.25x (+25%)** on unaligned 8B edge cases.
+*   **vs. llama.cpp-Style Reference:** Our custom engine delivers a consistent **1.19x to 1.76x speedup** across all scales and prompt boundaries, demonstrating the impact of 128-bit LSU saturation and fused dequantization.
 
 ---
 

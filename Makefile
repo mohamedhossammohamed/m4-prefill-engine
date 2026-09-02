@@ -2,9 +2,12 @@ CXX = clang++
 CXXFLAGS = -O3 -std=c++17 -Wall
 FRAMEWORKS = -framework Metal -framework Foundation -framework MetalPerformanceShaders
 
-TARGETS = bench_m4 micro_bench pipelined_bench flash_attn_bench unified_prefill_engine thermal_stress_test bench_8b_engine bench_all_scales brick1_micro_bench brick2_fused_bench brick3_swiglu_bench brick4_attn_bench bench_universal_router bench_streaming_kv
+TARGETS = bench_m4 micro_bench pipelined_bench flash_attn_bench unified_prefill_engine thermal_stress_test bench_8b_engine bench_all_scales brick1_micro_bench brick2_fused_bench brick3_swiglu_bench brick4_attn_bench bench_universal_router bench_streaming_kv bench_streaming_1m
 
 all: $(TARGETS)
+
+bench_streaming_1m: bench_streaming_1m.mm streaming_1m_engine.mm streaming_1m_engine.h streaming_1m_kernels.metal
+	$(CXX) $(CXXFLAGS) $(FRAMEWORKS) -o bench_streaming_1m bench_streaming_1m.mm streaming_1m_engine.mm
 
 bench_streaming_kv: bench_streaming_kv.mm AsyncKVRingBuffer.mm AsyncKVRingBuffer.h streaming_kv_kernels.metal
 	$(CXX) $(CXXFLAGS) $(FRAMEWORKS) -o bench_streaming_kv bench_streaming_kv.mm AsyncKVRingBuffer.mm

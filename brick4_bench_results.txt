@@ -1,0 +1,134 @@
+====================================================================================================
+          J.A.R.V.I.S. BRICK 4 EMPIRICAL MICRO-EXPERIMENT: 2D BLOCK-MMA FLASHATTENTION              
+          Apple M4 (10-Core GPU, 16GB UMA) | Scalar Baseline vs MMA FP16 vs Dynamic Q8_0 KV Cache  
+====================================================================================================
+[+] Active Hardware Device: Apple M4
+[+] Max Threadgroup Memory: 32 KB
+
+>>> [1] STRICT NUMERICAL VERIFICATION AGAINST CPU DOUBLE-PRECISION GOLD REFERENCE (MaxDiff <= 0.05)
+
+    ======================== Verification for D = 64 (scale = 0.125) ========================
+    [*] Verifying Shape [H=8, M= 33, D=64] ... PASS (All 3 variants MaxDiff <= 0.05)
+    [*] Verifying Shape [H=8, M=127, D=64] ... PASS (All 3 variants MaxDiff <= 0.05)
+    [*] Verifying Shape [H=8, M=128, D=64] ... PASS (All 3 variants MaxDiff <= 0.05)
+    [*] Verifying Shape [H=8, M=129, D=64] ... PASS (All 3 variants MaxDiff <= 0.05)
+    [*] Verifying Shape [H=8, M=256, D=64] ... PASS (All 3 variants MaxDiff <= 0.05)
+
+    ======================== Verification for D = 128 (scale = 0.0883883) ========================
+    [*] Verifying Shape [H=8, M= 33, D=128] ... PASS (All 3 variants MaxDiff <= 0.05)
+    [*] Verifying Shape [H=8, M=127, D=128] ... PASS (All 3 variants MaxDiff <= 0.05)
+    [*] Verifying Shape [H=8, M=128, D=128] ... PASS (All 3 variants MaxDiff <= 0.05)
+    [*] Verifying Shape [H=8, M=129, D=128] ... PASS (All 3 variants MaxDiff <= 0.05)
+    [*] Verifying Shape [H=8, M=256, D=128] ... PASS (All 3 variants MaxDiff <= 0.05)
+
+>>> [2] HEAD-TO-HEAD BENCHMARK EXECUTION (10 Warmup + 20 Measured Iterations)
+
+===================================================================================================================
+ SCALE: 1B Attention Shape (Llama-3.2-1B: H = 32, D = 64) | Scale factor = 0.125
+===================================================================================================================
+
+>>> Sequence Length M =   33 | Causal Pairs = 561 | Total FLOPs = 0.00 GFLOPs
+Variant                               GPU Med (ms)  GPU Min (ms)  GPU Max (ms)        TFLOPS     Speedup     KV (MB)
+-------------------------------------------------------------------------------------------------------------------
+Scalar Baseline (1D Vector ALU, BR=32, BC=16)         0.177         0.099         0.179          0.03       1.00x        0.26
+2D BlockMMA FlashAttn (FP16 KV Cache, BQ=64, BK=64)         0.041         0.041         0.045          0.11       4.27x        0.26
+2D BlockMMA FlashAttn (Dynamic Q8_0 KV, BQ=64, BK=64)         0.040         0.039         0.048          0.11       4.40x        0.14
+
+>>> Sequence Length M =  127 | Causal Pairs = 8128 | Total FLOPs = 0.07 GFLOPs
+Variant                               GPU Med (ms)  GPU Min (ms)  GPU Max (ms)        TFLOPS     Speedup     KV (MB)
+-------------------------------------------------------------------------------------------------------------------
+Scalar Baseline (1D Vector ALU, BR=32, BC=16)         0.252         0.212         0.254          0.26       1.00x        0.99
+2D BlockMMA FlashAttn (FP16 KV Cache, BQ=64, BK=64)         0.091         0.090         0.098          0.73       2.76x        0.99
+2D BlockMMA FlashAttn (Dynamic Q8_0 KV, BQ=64, BK=64)         0.089         0.088         0.091          0.74       2.82x        0.53
+
+>>> Sequence Length M =  128 | Causal Pairs = 8256 | Total FLOPs = 0.07 GFLOPs
+Variant                               GPU Med (ms)  GPU Min (ms)  GPU Max (ms)        TFLOPS     Speedup     KV (MB)
+-------------------------------------------------------------------------------------------------------------------
+Scalar Baseline (1D Vector ALU, BR=32, BC=16)         0.254         0.247         0.282          0.27       1.00x        1.00
+2D BlockMMA FlashAttn (FP16 KV Cache, BQ=64, BK=64)         0.100         0.095         0.114          0.68       2.55x        1.00
+2D BlockMMA FlashAttn (Dynamic Q8_0 KV, BQ=64, BK=64)         0.089         0.087         0.101          0.76       2.85x        0.53
+
+>>> Sequence Length M =  129 | Causal Pairs = 8385 | Total FLOPs = 0.07 GFLOPs
+Variant                               GPU Med (ms)  GPU Min (ms)  GPU Max (ms)        TFLOPS     Speedup     KV (MB)
+-------------------------------------------------------------------------------------------------------------------
+Scalar Baseline (1D Vector ALU, BR=32, BC=16)         0.278         0.273         0.279          0.25       1.00x        1.01
+2D BlockMMA FlashAttn (FP16 KV Cache, BQ=64, BK=64)         0.168         0.155         0.176          0.41       1.66x        1.01
+2D BlockMMA FlashAttn (Dynamic Q8_0 KV, BQ=64, BK=64)         0.160         0.152         0.164          0.43       1.73x        0.54
+
+>>> Sequence Length M =  512 | Causal Pairs = 131328 | Total FLOPs = 1.08 GFLOPs
+Variant                               GPU Med (ms)  GPU Min (ms)  GPU Max (ms)        TFLOPS     Speedup     KV (MB)
+-------------------------------------------------------------------------------------------------------------------
+Scalar Baseline (1D Vector ALU, BR=32, BC=16)         1.864         1.836         1.921          0.58       1.00x        4.00
+2D BlockMMA FlashAttn (FP16 KV Cache, BQ=64, BK=64)         0.837         0.819         0.856          1.29       2.23x        4.00
+2D BlockMMA FlashAttn (Dynamic Q8_0 KV, BQ=64, BK=64)         0.812         0.793         0.835          1.32       2.29x        2.12
+
+>>> Sequence Length M = 1024 | Causal Pairs = 524800 | Total FLOPs = 4.30 GFLOPs
+Variant                               GPU Med (ms)  GPU Min (ms)  GPU Max (ms)        TFLOPS     Speedup     KV (MB)
+-------------------------------------------------------------------------------------------------------------------
+Scalar Baseline (1D Vector ALU, BR=32, BC=16)         6.576         6.254         6.869          0.65       1.00x        8.00
+2D BlockMMA FlashAttn (FP16 KV Cache, BQ=64, BK=64)         2.978         2.958         3.055          1.44       2.21x        8.00
+2D BlockMMA FlashAttn (Dynamic Q8_0 KV, BQ=64, BK=64)         2.851         2.808         3.417          1.51       2.31x        4.25
+
+>>> Sequence Length M = 2048 | Causal Pairs = 2098176 | Total FLOPs = 17.19 GFLOPs
+Variant                               GPU Med (ms)  GPU Min (ms)  GPU Max (ms)        TFLOPS     Speedup     KV (MB)
+-------------------------------------------------------------------------------------------------------------------
+Scalar Baseline (1D Vector ALU, BR=32, BC=16)        25.543        24.835        26.710          0.67       1.00x       16.00
+2D BlockMMA FlashAttn (FP16 KV Cache, BQ=64, BK=64)        11.542        11.170        12.366          1.49       2.21x       16.00
+2D BlockMMA FlashAttn (Dynamic Q8_0 KV, BQ=64, BK=64)        10.997        10.601        11.510          1.56       2.32x        8.50
+
+===================================================================================================================
+ SCALE: 8B Attention Shape (Llama-3-8B:    H = 32, D = 128) | Scale factor = 0.09
+===================================================================================================================
+
+>>> Sequence Length M =   33 | Causal Pairs = 561 | Total FLOPs = 0.01 GFLOPs
+Variant                               GPU Med (ms)  GPU Min (ms)  GPU Max (ms)        TFLOPS     Speedup     KV (MB)
+-------------------------------------------------------------------------------------------------------------------
+Scalar Baseline (1D Vector ALU, BR=32, BC=16)         0.179         0.176         0.226          0.05       1.00x        0.52
+2D BlockMMA FlashAttn (FP16 KV Cache, BQ=64, BK=64)         0.298         0.290         0.740          0.03       0.60x        0.52
+2D BlockMMA FlashAttn (Dynamic Q8_0 KV, BQ=64, BK=64)         0.288         0.284         0.601          0.03       0.62x        0.27
+
+>>> Sequence Length M =  127 | Causal Pairs = 8128 | Total FLOPs = 0.13 GFLOPs
+Variant                               GPU Med (ms)  GPU Min (ms)  GPU Max (ms)        TFLOPS     Speedup     KV (MB)
+-------------------------------------------------------------------------------------------------------------------
+Scalar Baseline (1D Vector ALU, BR=32, BC=16)         0.930         0.906         1.134          0.14       1.00x        1.98
+2D BlockMMA FlashAttn (FP16 KV Cache, BQ=64, BK=64)         0.875         0.813         1.375          0.15       1.06x        1.98
+2D BlockMMA FlashAttn (Dynamic Q8_0 KV, BQ=64, BK=64)         0.850         0.788         1.101          0.16       1.09x        1.05
+
+>>> Sequence Length M =  128 | Causal Pairs = 8256 | Total FLOPs = 0.14 GFLOPs
+Variant                               GPU Med (ms)  GPU Min (ms)  GPU Max (ms)        TFLOPS     Speedup     KV (MB)
+-------------------------------------------------------------------------------------------------------------------
+Scalar Baseline (1D Vector ALU, BR=32, BC=16)         1.003         0.914         1.173          0.13       1.00x        2.00
+2D BlockMMA FlashAttn (FP16 KV Cache, BQ=64, BK=64)         0.892         0.820         1.115          0.15       1.12x        2.00
+2D BlockMMA FlashAttn (Dynamic Q8_0 KV, BQ=64, BK=64)         0.864         0.784         1.056          0.16       1.16x        1.06
+
+>>> Sequence Length M =  129 | Causal Pairs = 8385 | Total FLOPs = 0.14 GFLOPs
+Variant                               GPU Med (ms)  GPU Min (ms)  GPU Max (ms)        TFLOPS     Speedup     KV (MB)
+-------------------------------------------------------------------------------------------------------------------
+Scalar Baseline (1D Vector ALU, BR=32, BC=16)         1.070         0.995         1.373          0.13       1.00x        2.02
+2D BlockMMA FlashAttn (FP16 KV Cache, BQ=64, BK=64)         1.559         1.490         1.793          0.09       0.69x        2.02
+2D BlockMMA FlashAttn (Dynamic Q8_0 KV, BQ=64, BK=64)         1.526         1.424         1.758          0.09       0.70x        1.07
+
+>>> Sequence Length M =  512 | Causal Pairs = 131328 | Total FLOPs = 2.15 GFLOPs
+Variant                               GPU Med (ms)  GPU Min (ms)  GPU Max (ms)        TFLOPS     Speedup     KV (MB)
+-------------------------------------------------------------------------------------------------------------------
+Scalar Baseline (1D Vector ALU, BR=32, BC=16)         8.102         7.892         8.313          0.27       1.00x        8.00
+2D BlockMMA FlashAttn (FP16 KV Cache, BQ=64, BK=64)         8.651         8.415         8.803          0.25       0.94x        8.00
+2D BlockMMA FlashAttn (Dynamic Q8_0 KV, BQ=64, BK=64)         8.292         8.131         8.463          0.26       0.98x        4.25
+
+>>> Sequence Length M = 1024 | Causal Pairs = 524800 | Total FLOPs = 8.60 GFLOPs
+Variant                               GPU Med (ms)  GPU Min (ms)  GPU Max (ms)        TFLOPS     Speedup     KV (MB)
+-------------------------------------------------------------------------------------------------------------------
+Scalar Baseline (1D Vector ALU, BR=32, BC=16)        29.104        27.492        30.514          0.30       1.00x       16.00
+2D BlockMMA FlashAttn (FP16 KV Cache, BQ=64, BK=64)        31.998        30.838        33.167          0.27       0.91x       16.00
+2D BlockMMA FlashAttn (Dynamic Q8_0 KV, BQ=64, BK=64)        31.741        30.115        33.272          0.27       0.92x        8.50
+
+>>> Sequence Length M = 2048 | Causal Pairs = 2098176 | Total FLOPs = 34.38 GFLOPs
+Variant                               GPU Med (ms)  GPU Min (ms)  GPU Max (ms)        TFLOPS     Speedup     KV (MB)
+-------------------------------------------------------------------------------------------------------------------
+Scalar Baseline (1D Vector ALU, BR=32, BC=16)       108.532       100.269       113.605          0.32       1.00x       32.00
+2D BlockMMA FlashAttn (FP16 KV Cache, BQ=64, BK=64)       116.799       115.341       125.957          0.29       0.93x       32.00
+2D BlockMMA FlashAttn (Dynamic Q8_0 KV, BQ=64, BK=64)       113.218       111.416       119.509          0.30       0.96x       17.00
+
+====================================================================================================
+          BRICK 4 EMPIRICAL BENCHMARK COMPLETE. ALL ASSERTIONS PASSED.                              
+====================================================================================================

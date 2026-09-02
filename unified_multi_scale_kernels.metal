@@ -14,8 +14,67 @@ struct block_q8_0 {
     int8_t qs[32];
 };
 
+struct mlx_4bit_planar {
+    device const uint4* qs;
+    device const half* scales;
+    device const half* biases;
+
+    inline mlx_4bit_planar(device const uint8_t* raw, size_t total_blocks) {
+        size_t qs_bytes = total_blocks * 16;
+        size_t scales_bytes = total_blocks * 2;
+        size_t scales_offset = (qs_bytes + 15) & ~15;
+        size_t biases_offset = (scales_offset + scales_bytes + 15) & ~15;
+
+        qs = reinterpret_cast<device const uint4*>(raw);
+        scales = reinterpret_cast<device const half*>(raw + scales_offset);
+        biases = reinterpret_cast<device const half*>(raw + biases_offset);
+    }
+};
+
 inline uint read_u32_unaligned(thread const uint8_t* p) {
     return (uint)p[0] | ((uint)p[1] << 8) | ((uint)p[2] << 16) | ((uint)p[3] << 24);
+}
+
+inline void unpack_mlx_4bit_block(
+    uint4 raw_bits,
+    half d,
+    half bias,
+    threadgroup half* sh_B,
+    uint linear_tid,
+    uint stride = 64)
+{
+    half4 hd = half4(d);
+    half4 h_bias = half4(bias);
+
+    uint w0 = raw_bits.x;
+    uint w1 = raw_bits.y;
+    uint w2 = raw_bits.z;
+    uint w3 = raw_bits.w;
+
+    half4 vl[4], vh[4];
+    vl[0] = fma(half4(as_type<uchar4>(w0 & 0x0F0F0F0Fu)), hd, h_bias);
+    vh[0] = fma(half4(as_type<uchar4>((w0 >> 4) & 0x0F0F0F0Fu)), hd, h_bias);
+    vl[1] = fma(half4(as_type<uchar4>(w1 & 0x0F0F0F0Fu)), hd, h_bias);
+    vh[1] = fma(half4(as_type<uchar4>((w1 >> 4) & 0x0F0F0F0Fu)), hd, h_bias);
+    vl[2] = fma(half4(as_type<uchar4>(w2 & 0x0F0F0F0Fu)), hd, h_bias);
+    vh[2] = fma(half4(as_type<uchar4>((w2 >> 4) & 0x0F0F0F0Fu)), hd, h_bias);
+    vl[3] = fma(half4(as_type<uchar4>(w3 & 0x0F0F0F0Fu)), hd, h_bias);
+    vh[3] = fma(half4(as_type<uchar4>((w3 >> 4) & 0x0F0F0F0Fu)), hd, h_bias);
+
+    #pragma unroll
+    for (int i = 0; i < 4; i++) {
+        sh_B[(i * 4 + 0) * stride + linear_tid] = vl[i][0];
+        sh_B[(i * 4 + 1) * stride + linear_tid] = vl[i][1];
+        sh_B[(i * 4 + 2) * stride + linear_tid] = vl[i][2];
+        sh_B[(i * 4 + 3) * stride + linear_tid] = vl[i][3];
+    }
+    #pragma unroll
+    for (int i = 0; i < 4; i++) {
+        sh_B[(16 + i * 4 + 0) * stride + linear_tid] = vh[i][0];
+        sh_B[(16 + i * 4 + 1) * stride + linear_tid] = vh[i][1];
+        sh_B[(16 + i * 4 + 2) * stride + linear_tid] = vh[i][2];
+        sh_B[(16 + i * 4 + 3) * stride + linear_tid] = vh[i][3];
+    }
 }
 
 // Fast vector exp for float4
@@ -318,6 +377,1064 @@ kernel void pipe_gemm_q4_0_32x32(
             if (global_r < M) {
                 C[global_r * N + col_idx] = (half)acc[r];
             }
+        }
+    }
+}
+
+// ============================================================================
+// PROMOTED BRICK 1: 2D BLOCKMMA HARDWARE MATRIX ENGINE (64x64 Tile, 4 SIMD = 128 Threads)
+// ============================================================================
+kernel void gemm_mma_q4_0_64x64(
+    device const half*         A [[buffer(0)]],
+    device const block_q4_0*   B [[buffer(1)]],
+    device half*               C [[buffer(2)]],
+    constant uint&             M [[buffer(3)]],
+    constant uint&             N [[buffer(4)]],
+    constant uint&             K [[buffer(5)]],
+    threadgroup half*          shmem [[threadgroup(0)]], // 16KB
+    uint2 tg_id   [[threadgroup_position_in_grid]],
+    uint  simd_lane_id [[thread_index_in_simdgroup]],
+    uint  simd_group_id [[simdgroup_index_in_threadgroup]])
+{
+    uint tg_row_start = tg_id.y * 64;
+    uint tg_col_start = tg_id.x * 64;
+
+    if (tg_row_start >= M || tg_col_start >= N) return;
+
+    uint linear_tid = simd_group_id * 32 + simd_lane_id;
+
+    threadgroup half* sh_A = shmem;
+    threadgroup half* sh_B = shmem + 2048;
+
+    uint sg_r = simd_group_id / 2; // 0 or 1
+    uint sg_c = simd_group_id % 2; // 0 or 1
+    uint sg_row_offset = sg_r * 32;
+    uint sg_col_offset = sg_c * 32;
+
+    simdgroup_matrix<float, 8, 8> acc[4][4];
+    #pragma unroll
+    for (int r = 0; r < 4; r++) {
+        #pragma unroll
+        for (int c = 0; c < 4; c++) {
+            acc[r][c] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
+        }
+    }
+
+    uint num_k_blocks = K / 32;
+
+    for (uint kb = 0; kb < num_k_blocks; kb++) {
+        #pragma unroll
+        for (int i = 0; i < 2; i++) {
+            uint idx = linear_tid * 2 + i;
+            uint r = idx / 4;
+            uint c = (idx % 4) * 8;
+            uint global_r = tg_row_start + r;
+            uint global_c = kb * 32 + c;
+            float4 val = float4(0.0f);
+            if (global_r < M && global_c < K) {
+                val = *reinterpret_cast<device const float4*>(&A[global_r * K + global_c]);
+            }
+            *reinterpret_cast<threadgroup float4*>(&sh_A[r * 32 + c]) = val;
+        }
+
+        if (linear_tid < 64) {
+            uint b_col_idx = tg_col_start + linear_tid;
+            if (b_col_idx < N) {
+                block_q4_0 blk = B[b_col_idx * num_k_blocks + kb];
+                half d = blk.d;
+                half4 hd = half4(d);
+                half4 h_off = half4(-8.0h * d);
+
+                uint w0 = read_u32_unaligned(blk.qs + 0);
+                uint w1 = read_u32_unaligned(blk.qs + 4);
+                uint w2 = read_u32_unaligned(blk.qs + 8);
+                uint w3 = read_u32_unaligned(blk.qs + 12);
+
+                half4 vl[4], vh[4];
+                vl[0] = fma(half4(as_type<uchar4>(w0 & 0x0F0F0F0Fu)), hd, h_off);
+                vh[0] = fma(half4(as_type<uchar4>((w0 >> 4) & 0x0F0F0F0Fu)), hd, h_off);
+                vl[1] = fma(half4(as_type<uchar4>(w1 & 0x0F0F0F0Fu)), hd, h_off);
+                vh[1] = fma(half4(as_type<uchar4>((w1 >> 4) & 0x0F0F0F0Fu)), hd, h_off);
+                vl[2] = fma(half4(as_type<uchar4>(w2 & 0x0F0F0F0Fu)), hd, h_off);
+                vh[2] = fma(half4(as_type<uchar4>((w2 >> 4) & 0x0F0F0F0Fu)), hd, h_off);
+                vl[3] = fma(half4(as_type<uchar4>(w3 & 0x0F0F0F0Fu)), hd, h_off);
+                vh[3] = fma(half4(as_type<uchar4>((w3 >> 4) & 0x0F0F0F0Fu)), hd, h_off);
+
+                #pragma unroll
+                for (int i = 0; i < 4; i++) {
+                    sh_B[(i * 4 + 0) * 64 + linear_tid] = vl[i][0];
+                    sh_B[(i * 4 + 1) * 64 + linear_tid] = vl[i][1];
+                    sh_B[(i * 4 + 2) * 64 + linear_tid] = vl[i][2];
+                    sh_B[(i * 4 + 3) * 64 + linear_tid] = vl[i][3];
+                    sh_B[(16 + i * 4 + 0) * 64 + linear_tid] = vh[i][0];
+                    sh_B[(16 + i * 4 + 1) * 64 + linear_tid] = vh[i][1];
+                    sh_B[(16 + i * 4 + 2) * 64 + linear_tid] = vh[i][2];
+                    sh_B[(16 + i * 4 + 3) * 64 + linear_tid] = vh[i][3];
+                }
+            } else {
+                #pragma unroll
+                for (int k = 0; k < 32; k++) {
+                    sh_B[k * 64 + linear_tid] = 0.0h;
+                }
+            }
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        #pragma unroll
+        for (int ks = 0; ks < 4; ks++) {
+            uint k_off = ks * 8;
+            simdgroup_matrix<half, 8, 8> a_frag[4];
+            simdgroup_matrix<half, 8, 8> b_frag[4];
+
+            #pragma unroll
+            for (int r = 0; r < 4; r++) {
+                simdgroup_load(a_frag[r], &sh_A[(sg_row_offset + r * 8) * 32 + k_off], 32);
+            }
+
+            #pragma unroll
+            for (int c = 0; c < 4; c++) {
+                simdgroup_load(b_frag[c], &sh_B[k_off * 64 + (sg_col_offset + c * 8)], 64);
+            }
+
+            #pragma unroll
+            for (int r = 0; r < 4; r++) {
+                #pragma unroll
+                for (int c = 0; c < 4; c++) {
+                    simdgroup_multiply_accumulate(acc[r][c], a_frag[r], b_frag[c], acc[r][c]);
+                }
+            }
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    threadgroup float* sh_Out = (threadgroup float*)shmem;
+    #pragma unroll
+    for (int r = 0; r < 4; r++) {
+        #pragma unroll
+        for (int c = 0; c < 4; c++) {
+            simdgroup_store(acc[r][c], &sh_Out[(sg_row_offset + r * 8) * 64 + (sg_col_offset + c * 8)], 64);
+        }
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    #pragma unroll
+    for (int i = 0; i < 32; i++) {
+        uint elem_idx = linear_tid * 32 + i;
+        uint r = elem_idx / 64;
+        uint c = elem_idx % 64;
+        uint global_r = tg_row_start + r;
+        uint global_c = tg_col_start + c;
+        if (global_r < M && global_c < N) {
+            C[global_r * N + global_c] = (half)sh_Out[elem_idx];
+        }
+    }
+}
+
+// ============================================================================
+// PROMOTED BRICK 1: DIRECT-HEAD QKV MMA GEMM PROJECTION -> [H, M, D]
+// ============================================================================
+kernel void qkv_head_gemm_mma_q4_0_64x64(
+    device const half*         A [[buffer(0)]], // [M, K]
+    device const block_q4_0*   B [[buffer(1)]], // [H*D, K/32]
+    device half*               C [[buffer(2)]], // [H, M, D]
+    constant uint&             M [[buffer(3)]],
+    constant uint&             H [[buffer(4)]],
+    constant uint&             D [[buffer(5)]],
+    constant uint&             K [[buffer(6)]],
+    threadgroup half*          shmem [[threadgroup(0)]], // 16KB
+    uint2 tg_id   [[threadgroup_position_in_grid]],
+    uint  simd_lane_id [[thread_index_in_simdgroup]],
+    uint  simd_group_id [[simdgroup_index_in_threadgroup]])
+{
+    uint N = H * D;
+    uint tg_row_start = tg_id.y * 64;
+    uint tg_col_start = tg_id.x * 64;
+
+    if (tg_row_start >= M || tg_col_start >= N) return;
+
+    uint linear_tid = simd_group_id * 32 + simd_lane_id;
+
+    threadgroup half* sh_A = shmem;
+    threadgroup half* sh_B = shmem + 2048;
+
+    uint sg_r = simd_group_id / 2;
+    uint sg_c = simd_group_id % 2;
+    uint sg_row_offset = sg_r * 32;
+    uint sg_col_offset = sg_c * 32;
+
+    simdgroup_matrix<float, 8, 8> acc[4][4];
+    #pragma unroll
+    for (int r = 0; r < 4; r++) {
+        #pragma unroll
+        for (int c = 0; c < 4; c++) {
+            acc[r][c] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
+        }
+    }
+
+    uint num_k_blocks = K / 32;
+
+    for (uint kb = 0; kb < num_k_blocks; kb++) {
+        #pragma unroll
+        for (int i = 0; i < 2; i++) {
+            uint idx = linear_tid * 2 + i;
+            uint r = idx / 4;
+            uint c = (idx % 4) * 8;
+            uint global_r = tg_row_start + r;
+            uint global_c = kb * 32 + c;
+            float4 val = float4(0.0f);
+            if (global_r < M && global_c < K) {
+                val = *reinterpret_cast<device const float4*>(&A[global_r * K + global_c]);
+            }
+            *reinterpret_cast<threadgroup float4*>(&sh_A[r * 32 + c]) = val;
+        }
+
+        if (linear_tid < 64) {
+            uint b_col_idx = tg_col_start + linear_tid;
+            if (b_col_idx < N) {
+                block_q4_0 blk = B[b_col_idx * num_k_blocks + kb];
+                half d = blk.d;
+                half4 hd = half4(d);
+                half4 h_off = half4(-8.0h * d);
+
+                uint w0 = read_u32_unaligned(blk.qs + 0);
+                uint w1 = read_u32_unaligned(blk.qs + 4);
+                uint w2 = read_u32_unaligned(blk.qs + 8);
+                uint w3 = read_u32_unaligned(blk.qs + 12);
+
+                half4 vl[4], vh[4];
+                vl[0] = fma(half4(as_type<uchar4>(w0 & 0x0F0F0F0Fu)), hd, h_off);
+                vh[0] = fma(half4(as_type<uchar4>((w0 >> 4) & 0x0F0F0F0Fu)), hd, h_off);
+                vl[1] = fma(half4(as_type<uchar4>(w1 & 0x0F0F0F0Fu)), hd, h_off);
+                vh[1] = fma(half4(as_type<uchar4>((w1 >> 4) & 0x0F0F0F0Fu)), hd, h_off);
+                vl[2] = fma(half4(as_type<uchar4>(w2 & 0x0F0F0F0Fu)), hd, h_off);
+                vh[2] = fma(half4(as_type<uchar4>((w2 >> 4) & 0x0F0F0F0Fu)), hd, h_off);
+                vl[3] = fma(half4(as_type<uchar4>(w3 & 0x0F0F0F0Fu)), hd, h_off);
+                vh[3] = fma(half4(as_type<uchar4>((w3 >> 4) & 0x0F0F0F0Fu)), hd, h_off);
+
+                #pragma unroll
+                for (int i = 0; i < 4; i++) {
+                    sh_B[(i * 4 + 0) * 64 + linear_tid] = vl[i][0];
+                    sh_B[(i * 4 + 1) * 64 + linear_tid] = vl[i][1];
+                    sh_B[(i * 4 + 2) * 64 + linear_tid] = vl[i][2];
+                    sh_B[(i * 4 + 3) * 64 + linear_tid] = vl[i][3];
+                    sh_B[(16 + i * 4 + 0) * 64 + linear_tid] = vh[i][0];
+                    sh_B[(16 + i * 4 + 1) * 64 + linear_tid] = vh[i][1];
+                    sh_B[(16 + i * 4 + 2) * 64 + linear_tid] = vh[i][2];
+                    sh_B[(16 + i * 4 + 3) * 64 + linear_tid] = vh[i][3];
+                }
+            } else {
+                #pragma unroll
+                for (int k = 0; k < 32; k++) {
+                    sh_B[k * 64 + linear_tid] = 0.0h;
+                }
+            }
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        #pragma unroll
+        for (int ks = 0; ks < 4; ks++) {
+            uint k_off = ks * 8;
+            simdgroup_matrix<half, 8, 8> a_frag[4];
+            simdgroup_matrix<half, 8, 8> b_frag[4];
+
+            #pragma unroll
+            for (int r = 0; r < 4; r++) {
+                simdgroup_load(a_frag[r], &sh_A[(sg_row_offset + r * 8) * 32 + k_off], 32);
+            }
+
+            #pragma unroll
+            for (int c = 0; c < 4; c++) {
+                simdgroup_load(b_frag[c], &sh_B[k_off * 64 + (sg_col_offset + c * 8)], 64);
+            }
+
+            #pragma unroll
+            for (int r = 0; r < 4; r++) {
+                #pragma unroll
+                for (int c = 0; c < 4; c++) {
+                    simdgroup_multiply_accumulate(acc[r][c], a_frag[r], b_frag[c], acc[r][c]);
+                }
+            }
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    threadgroup float* sh_Out = (threadgroup float*)shmem;
+    #pragma unroll
+    for (int r = 0; r < 4; r++) {
+        #pragma unroll
+        for (int c = 0; c < 4; c++) {
+            simdgroup_store(acc[r][c], &sh_Out[(sg_row_offset + r * 8) * 64 + (sg_col_offset + c * 8)], 64);
+        }
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    #pragma unroll
+    for (int i = 0; i < 32; i++) {
+        uint elem_idx = linear_tid * 32 + i;
+        uint r = elem_idx / 64;
+        uint c = elem_idx % 64;
+        uint global_r = tg_row_start + r;
+        uint global_c = tg_col_start + c;
+        if (global_r < M && global_c < N) {
+            uint h = global_c / D;
+            uint d = global_c % D;
+            uint out_idx = (h * M + global_r) * D + d;
+            C[out_idx] = (half)sh_Out[elem_idx];
+        }
+    }
+}
+
+// ============================================================================
+// PROMOTED BRICK 3: DUAL-SIMDGROUP COOPERATIVE SWIGLU MMA ENGINE
+// ============================================================================
+kernel void swiglu_mma_dual_simd(
+    device const half*         A      [[buffer(0)]], // [M, K]
+    device const block_q4_0*   B_gate [[buffer(1)]], // [N_mlp, K/32]
+    device const block_q4_0*   B_up   [[buffer(2)]], // [N_mlp, K/32]
+    device half*               Out    [[buffer(3)]], // [M, N_mlp]
+    constant uint&             M      [[buffer(4)]],
+    constant uint&             N_mlp  [[buffer(5)]],
+    constant uint&             K      [[buffer(6)]],
+    threadgroup half*          shmem  [[threadgroup(0)]], // 17408 bytes
+    uint2 tg_id   [[threadgroup_position_in_grid]],
+    uint  simd_lane_id [[thread_index_in_simdgroup]],
+    uint  simd_group_id [[simdgroup_index_in_threadgroup]])
+{
+    uint tg_row_start = tg_id.y * 64;
+    uint tg_col_start = tg_id.x * 32;
+
+    if (tg_row_start >= M || tg_col_start >= N_mlp) return;
+
+    uint linear_tid = simd_group_id * 32 + simd_lane_id;
+
+    threadgroup half (*sh_A)[64][36]      = (threadgroup half (*)[64][36])shmem;
+    threadgroup half (*sh_B_gate)[32][32] = (threadgroup half (*)[32][32])(shmem + 4608);
+    threadgroup half (*sh_B_up)[32][32]   = (threadgroup half (*)[32][32])(shmem + 4608 + 2048);
+
+    uint sg_row_offset = (simd_group_id & 1) * 32;
+    bool is_gate_sg = (simd_group_id < 2);
+
+    simdgroup_matrix<float, 8, 8> acc[4][4];
+    #pragma unroll
+    for (int r = 0; r < 4; r++) {
+        #pragma unroll
+        for (int c = 0; c < 4; c++) {
+            acc[r][c] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
+        }
+    }
+
+    uint num_k_blocks = K / 32;
+
+    auto load_A_tile = [&](uint buf_idx, uint kb) {
+        #pragma unroll
+        for (int i = 0; i < 2; i++) {
+            uint idx = linear_tid * 2 + i;
+            uint r = idx / 4;
+            uint c = (idx % 4) * 8;
+            uint global_r = tg_row_start + r;
+            uint global_c = kb * 32 + c;
+            float4 val = float4(0.0f);
+            if (global_r < M && global_c < K) {
+                val = *reinterpret_cast<device const float4*>(&A[global_r * K + global_c]);
+            }
+            *reinterpret_cast<threadgroup float2*>(&sh_A[buf_idx][r][c]) = val.xy;
+            *reinterpret_cast<threadgroup float2*>(&sh_A[buf_idx][r][c + 4]) = val.zw;
+        }
+    };
+
+    auto dequant_B_tiles = [&](uint buf_idx, uint kb) {
+        if (linear_tid < 32) {
+            uint col = tg_col_start + linear_tid;
+            if (col < N_mlp && kb < num_k_blocks) {
+                block_q4_0 blk = B_gate[col * num_k_blocks + kb];
+                half d = blk.d;
+                half4 hd = half4(d);
+                half4 h_off = half4(-8.0h * d);
+
+                uint w0 = read_u32_unaligned(blk.qs + 0);
+                uint w1 = read_u32_unaligned(blk.qs + 4);
+                uint w2 = read_u32_unaligned(blk.qs + 8);
+                uint w3 = read_u32_unaligned(blk.qs + 12);
+
+                half4 vl[4], vh[4];
+                vl[0] = fma(half4(as_type<uchar4>(w0 & 0x0F0F0F0Fu)), hd, h_off);
+                vh[0] = fma(half4(as_type<uchar4>((w0 >> 4) & 0x0F0F0F0Fu)), hd, h_off);
+                vl[1] = fma(half4(as_type<uchar4>(w1 & 0x0F0F0F0Fu)), hd, h_off);
+                vh[1] = fma(half4(as_type<uchar4>((w1 >> 4) & 0x0F0F0F0Fu)), hd, h_off);
+                vl[2] = fma(half4(as_type<uchar4>(w2 & 0x0F0F0F0Fu)), hd, h_off);
+                vh[2] = fma(half4(as_type<uchar4>((w2 >> 4) & 0x0F0F0F0Fu)), hd, h_off);
+                vl[3] = fma(half4(as_type<uchar4>(w3 & 0x0F0F0F0Fu)), hd, h_off);
+                vh[3] = fma(half4(as_type<uchar4>((w3 >> 4) & 0x0F0F0F0Fu)), hd, h_off);
+
+                #pragma unroll
+                for (int i = 0; i < 4; i++) {
+                    sh_B_gate[buf_idx][i * 4 + 0][linear_tid] = vl[i][0];
+                    sh_B_gate[buf_idx][i * 4 + 1][linear_tid] = vl[i][1];
+                    sh_B_gate[buf_idx][i * 4 + 2][linear_tid] = vl[i][2];
+                    sh_B_gate[buf_idx][i * 4 + 3][linear_tid] = vl[i][3];
+                    sh_B_gate[buf_idx][16 + i * 4 + 0][linear_tid] = vh[i][0];
+                    sh_B_gate[buf_idx][16 + i * 4 + 1][linear_tid] = vh[i][1];
+                    sh_B_gate[buf_idx][16 + i * 4 + 2][linear_tid] = vh[i][2];
+                    sh_B_gate[buf_idx][16 + i * 4 + 3][linear_tid] = vh[i][3];
+                }
+            } else {
+                #pragma unroll
+                for (int k = 0; k < 32; k++) {
+                    sh_B_gate[buf_idx][k][linear_tid] = 0.0h;
+                }
+            }
+        } else if (linear_tid >= 32 && linear_tid < 64) {
+            uint up_col_idx = linear_tid - 32;
+            uint col = tg_col_start + up_col_idx;
+            if (col < N_mlp && kb < num_k_blocks) {
+                block_q4_0 blk = B_up[col * num_k_blocks + kb];
+                half d = blk.d;
+                half4 hd = half4(d);
+                half4 h_off = half4(-8.0h * d);
+
+                uint w0 = read_u32_unaligned(blk.qs + 0);
+                uint w1 = read_u32_unaligned(blk.qs + 4);
+                uint w2 = read_u32_unaligned(blk.qs + 8);
+                uint w3 = read_u32_unaligned(blk.qs + 12);
+
+                half4 vl[4], vh[4];
+                vl[0] = fma(half4(as_type<uchar4>(w0 & 0x0F0F0F0Fu)), hd, h_off);
+                vh[0] = fma(half4(as_type<uchar4>((w0 >> 4) & 0x0F0F0F0Fu)), hd, h_off);
+                vl[1] = fma(half4(as_type<uchar4>(w1 & 0x0F0F0F0Fu)), hd, h_off);
+                vh[1] = fma(half4(as_type<uchar4>((w1 >> 4) & 0x0F0F0F0Fu)), hd, h_off);
+                vl[2] = fma(half4(as_type<uchar4>(w2 & 0x0F0F0F0Fu)), hd, h_off);
+                vh[2] = fma(half4(as_type<uchar4>((w2 >> 4) & 0x0F0F0F0Fu)), hd, h_off);
+                vl[3] = fma(half4(as_type<uchar4>(w3 & 0x0F0F0F0Fu)), hd, h_off);
+                vh[3] = fma(half4(as_type<uchar4>((w3 >> 4) & 0x0F0F0F0Fu)), hd, h_off);
+
+                #pragma unroll
+                for (int i = 0; i < 4; i++) {
+                    sh_B_up[buf_idx][i * 4 + 0][up_col_idx] = vl[i][0];
+                    sh_B_up[buf_idx][i * 4 + 1][up_col_idx] = vl[i][1];
+                    sh_B_up[buf_idx][i * 4 + 2][up_col_idx] = vl[i][2];
+                    sh_B_up[buf_idx][i * 4 + 3][up_col_idx] = vl[i][3];
+                    sh_B_up[buf_idx][16 + i * 4 + 0][up_col_idx] = vh[i][0];
+                    sh_B_up[buf_idx][16 + i * 4 + 1][up_col_idx] = vh[i][1];
+                    sh_B_up[buf_idx][16 + i * 4 + 2][up_col_idx] = vh[i][2];
+                    sh_B_up[buf_idx][16 + i * 4 + 3][up_col_idx] = vh[i][3];
+                }
+            } else {
+                #pragma unroll
+                for (int k = 0; k < 32; k++) {
+                    sh_B_up[buf_idx][k][up_col_idx] = 0.0h;
+                }
+            }
+        }
+    };
+
+    auto compute_mma = [&](uint buf_idx) {
+        #pragma unroll
+        for (int ks = 0; ks < 4; ks++) {
+            uint k_off = ks * 8;
+            simdgroup_matrix<half, 8, 8> a_frag[4];
+            simdgroup_matrix<half, 8, 8> b_frag[4];
+
+            #pragma unroll
+            for (int r = 0; r < 4; r++) {
+                simdgroup_load(a_frag[r], &sh_A[buf_idx][sg_row_offset + r * 8][k_off], 36);
+            }
+
+            if (is_gate_sg) {
+                #pragma unroll
+                for (int c = 0; c < 4; c++) {
+                    simdgroup_load(b_frag[c], &sh_B_gate[buf_idx][k_off][c * 8], 32);
+                }
+            } else {
+                #pragma unroll
+                for (int c = 0; c < 4; c++) {
+                    simdgroup_load(b_frag[c], &sh_B_up[buf_idx][k_off][c * 8], 32);
+                }
+            }
+
+            #pragma unroll
+            for (int r = 0; r < 4; r++) {
+                #pragma unroll
+                for (int c = 0; c < 4; c++) {
+                    simdgroup_multiply_accumulate(acc[r][c], a_frag[r], b_frag[c], acc[r][c]);
+                }
+            }
+        }
+    };
+
+    load_A_tile(0, 0);
+    dequant_B_tiles(0, 0);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint kb = 0; kb < num_k_blocks; kb++) {
+        uint cur = kb & 1;
+        uint nxt = cur ^ 1;
+        uint next_kb = kb + 1;
+
+        if (next_kb < num_k_blocks) {
+            load_A_tile(nxt, next_kb);
+            dequant_B_tiles(nxt, next_kb);
+        }
+
+        compute_mma(cur);
+
+        if (next_kb < num_k_blocks) {
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+
+    threadgroup float (*sh_Gate)[32] = (threadgroup float (*)[32])shmem;
+    threadgroup float (*sh_Up)[32]   = (threadgroup float (*)[32])(shmem + 4096);
+
+    if (simd_group_id == 0) {
+        #pragma unroll
+        for (int r = 0; r < 4; r++) {
+            #pragma unroll
+            for (int c = 0; c < 4; c++) {
+                simdgroup_store(acc[r][c], &sh_Gate[0 + r * 8][c * 8], 32);
+            }
+        }
+    } else if (simd_group_id == 1) {
+        #pragma unroll
+        for (int r = 0; r < 4; r++) {
+            #pragma unroll
+            for (int c = 0; c < 4; c++) {
+                simdgroup_store(acc[r][c], &sh_Gate[32 + r * 8][c * 8], 32);
+            }
+        }
+    } else if (simd_group_id == 2) {
+        #pragma unroll
+        for (int r = 0; r < 4; r++) {
+            #pragma unroll
+            for (int c = 0; c < 4; c++) {
+                simdgroup_store(acc[r][c], &sh_Up[0 + r * 8][c * 8], 32);
+            }
+        }
+    } else if (simd_group_id == 3) {
+        #pragma unroll
+        for (int r = 0; r < 4; r++) {
+            #pragma unroll
+            for (int c = 0; c < 4; c++) {
+                simdgroup_store(acc[r][c], &sh_Up[32 + r * 8][c * 8], 32);
+            }
+        }
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    #pragma unroll
+    for (int i = 0; i < 16; i++) {
+        uint elem_idx = linear_tid * 16 + i;
+        uint r = elem_idx / 32;
+        uint c = elem_idx % 32;
+        uint global_r = tg_row_start + r;
+        uint global_c = tg_col_start + c;
+        if (global_r < M && global_c < N_mlp) {
+            float g = sh_Gate[r][c];
+            float u = sh_Up[r][c];
+            float silu_g = g / (1.0f + exp(-g));
+            Out[global_r * N_mlp + global_c] = (half)(silu_g * u);
+        }
+    }
+}
+
+// ============================================================================
+// MLX 4-BIT HARDWARE MATRIX ENGINE (64x64 Tile, 4 SIMD = 128 Threads)
+// ============================================================================
+kernel void gemm_mma_mlx_4bit_64x64(
+    device const half*           A [[buffer(0)]],
+    device const uint8_t*        B_raw [[buffer(1)]],
+    device half*                 C [[buffer(2)]],
+    constant uint&               M [[buffer(3)]],
+    constant uint&               N [[buffer(4)]],
+    constant uint&               K [[buffer(5)]],
+    threadgroup half*            shmem [[threadgroup(0)]], // 16KB
+    uint2 tg_id   [[threadgroup_position_in_grid]],
+    uint  simd_lane_id [[thread_index_in_simdgroup]],
+    uint  simd_group_id [[simdgroup_index_in_threadgroup]])
+{
+    uint tg_row_start = tg_id.y * 64;
+    uint tg_col_start = tg_id.x * 64;
+
+    if (tg_row_start >= M || tg_col_start >= N) return;
+
+    uint linear_tid = simd_group_id * 32 + simd_lane_id;
+
+    threadgroup half (*sh_A)[36] = (threadgroup half (*)[36])shmem;
+    threadgroup half* sh_B = shmem + (64 * 36);
+
+    uint sg_r = simd_group_id / 2; // 0 or 1
+    uint sg_c = simd_group_id % 2; // 0 or 1
+    uint sg_row_offset = sg_r * 32;
+    uint sg_col_offset = sg_c * 32;
+
+    simdgroup_matrix<float, 8, 8> acc[4][4];
+    #pragma unroll
+    for (int r = 0; r < 4; r++) {
+        #pragma unroll
+        for (int c = 0; c < 4; c++) {
+            acc[r][c] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
+        }
+    }
+
+    uint num_k_blocks = K / 32;
+    size_t total_blocks = (size_t)N * num_k_blocks;
+    mlx_4bit_planar B_planar(B_raw, total_blocks);
+
+    for (uint kb = 0; kb < num_k_blocks; kb++) {
+        #pragma unroll
+        for (int i = 0; i < 2; i++) {
+            uint idx = linear_tid * 2 + i;
+            uint r = idx / 4;
+            uint c = (idx % 4) * 8;
+            uint global_r = tg_row_start + r;
+            uint global_c = kb * 32 + c;
+            float4 val = float4(0.0f);
+            if (global_r < M && global_c < K) {
+                val = *reinterpret_cast<device const float4*>(&A[global_r * K + global_c]);
+            }
+            *reinterpret_cast<threadgroup float2*>(&sh_A[r][c]) = val.xy;
+            *reinterpret_cast<threadgroup float2*>(&sh_A[r][c + 4]) = val.zw;
+        }
+
+        if (linear_tid < 64) {
+            uint b_col_idx = tg_col_start + linear_tid;
+            if (b_col_idx < N) {
+                uint blk_idx = b_col_idx * num_k_blocks + kb;
+                unpack_mlx_4bit_block(B_planar.qs[blk_idx], B_planar.scales[blk_idx], B_planar.biases[blk_idx], sh_B, linear_tid, 64);
+            } else {
+                #pragma unroll
+                for (int k = 0; k < 32; k++) {
+                    sh_B[k * 64 + linear_tid] = 0.0h;
+                }
+            }
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        #pragma unroll
+        for (int ks = 0; ks < 4; ks++) {
+            uint k_off = ks * 8;
+            simdgroup_matrix<half, 8, 8> a_frag[4];
+            simdgroup_matrix<half, 8, 8> b_frag[4];
+
+            #pragma unroll
+            for (int r = 0; r < 4; r++) {
+                simdgroup_load(a_frag[r], &sh_A[sg_row_offset + r * 8][k_off], 36);
+            }
+
+            #pragma unroll
+            for (int c = 0; c < 4; c++) {
+                simdgroup_load(b_frag[c], &sh_B[k_off * 64 + (sg_col_offset + c * 8)], 64);
+            }
+
+            #pragma unroll
+            for (int r = 0; r < 4; r++) {
+                #pragma unroll
+                for (int c = 0; c < 4; c++) {
+                    simdgroup_multiply_accumulate(acc[r][c], a_frag[r], b_frag[c], acc[r][c]);
+                }
+            }
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    threadgroup float* sh_Out = (threadgroup float*)shmem;
+    #pragma unroll
+    for (int r = 0; r < 4; r++) {
+        #pragma unroll
+        for (int c = 0; c < 4; c++) {
+            simdgroup_store(acc[r][c], &sh_Out[(sg_row_offset + r * 8) * 64 + (sg_col_offset + c * 8)], 64);
+        }
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    #pragma unroll
+    for (int i = 0; i < 32; i++) {
+        uint elem_idx = linear_tid * 32 + i;
+        uint r = elem_idx / 64;
+        uint c = elem_idx % 64;
+        uint global_r = tg_row_start + r;
+        uint global_c = tg_col_start + c;
+        if (global_r < M && global_c < N) {
+            C[global_r * N + global_c] = (half)sh_Out[elem_idx];
+        }
+    }
+}
+
+// ============================================================================
+// MLX 4-BIT DIRECT-HEAD QKV MMA GEMM PROJECTION -> [H, M, D]
+// ============================================================================
+kernel void qkv_head_gemm_mma_mlx_4bit_64x64(
+    device const half*           A [[buffer(0)]], // [M, K]
+    device const uint8_t*        B_raw [[buffer(1)]], // [H*D, K/32] planar
+    device half*                 C [[buffer(2)]], // [H, M, D]
+    constant uint&               M [[buffer(3)]],
+    constant uint&               H [[buffer(4)]],
+    constant uint&               D [[buffer(5)]],
+    constant uint&               K [[buffer(6)]],
+    threadgroup half*            shmem [[threadgroup(0)]], // 16KB
+    uint2 tg_id   [[threadgroup_position_in_grid]],
+    uint  simd_lane_id [[thread_index_in_simdgroup]],
+    uint  simd_group_id [[simdgroup_index_in_threadgroup]])
+{
+    uint N = H * D;
+    uint tg_row_start = tg_id.y * 64;
+    uint tg_col_start = tg_id.x * 64;
+
+    if (tg_row_start >= M || tg_col_start >= N) return;
+
+    uint linear_tid = simd_group_id * 32 + simd_lane_id;
+
+    threadgroup half (*sh_A)[36] = (threadgroup half (*)[36])shmem;
+    threadgroup half* sh_B = shmem + (64 * 36);
+
+    uint sg_r = simd_group_id / 2;
+    uint sg_c = simd_group_id % 2;
+    uint sg_row_offset = sg_r * 32;
+    uint sg_col_offset = sg_c * 32;
+
+    simdgroup_matrix<float, 8, 8> acc[4][4];
+    #pragma unroll
+    for (int r = 0; r < 4; r++) {
+        #pragma unroll
+        for (int c = 0; c < 4; c++) {
+            acc[r][c] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
+        }
+    }
+
+    uint num_k_blocks = K / 32;
+    size_t total_blocks = (size_t)N * num_k_blocks;
+    mlx_4bit_planar B_planar(B_raw, total_blocks);
+
+    for (uint kb = 0; kb < num_k_blocks; kb++) {
+        #pragma unroll
+        for (int i = 0; i < 2; i++) {
+            uint idx = linear_tid * 2 + i;
+            uint r = idx / 4;
+            uint c = (idx % 4) * 8;
+            uint global_r = tg_row_start + r;
+            uint global_c = kb * 32 + c;
+            float4 val = float4(0.0f);
+            if (global_r < M && global_c < K) {
+                val = *reinterpret_cast<device const float4*>(&A[global_r * K + global_c]);
+            }
+            *reinterpret_cast<threadgroup float2*>(&sh_A[r][c]) = val.xy;
+            *reinterpret_cast<threadgroup float2*>(&sh_A[r][c + 4]) = val.zw;
+        }
+
+        if (linear_tid < 64) {
+            uint b_col_idx = tg_col_start + linear_tid;
+            if (b_col_idx < N) {
+                uint blk_idx = b_col_idx * num_k_blocks + kb;
+                unpack_mlx_4bit_block(B_planar.qs[blk_idx], B_planar.scales[blk_idx], B_planar.biases[blk_idx], sh_B, linear_tid, 64);
+            } else {
+                #pragma unroll
+                for (int k = 0; k < 32; k++) {
+                    sh_B[k * 64 + linear_tid] = 0.0h;
+                }
+            }
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        #pragma unroll
+        for (int ks = 0; ks < 4; ks++) {
+            uint k_off = ks * 8;
+            simdgroup_matrix<half, 8, 8> a_frag[4];
+            simdgroup_matrix<half, 8, 8> b_frag[4];
+
+            #pragma unroll
+            for (int r = 0; r < 4; r++) {
+                simdgroup_load(a_frag[r], &sh_A[sg_row_offset + r * 8][k_off], 36);
+            }
+
+            #pragma unroll
+            for (int c = 0; c < 4; c++) {
+                simdgroup_load(b_frag[c], &sh_B[k_off * 64 + (sg_col_offset + c * 8)], 64);
+            }
+
+            #pragma unroll
+            for (int r = 0; r < 4; r++) {
+                #pragma unroll
+                for (int c = 0; c < 4; c++) {
+                    simdgroup_multiply_accumulate(acc[r][c], a_frag[r], b_frag[c], acc[r][c]);
+                }
+            }
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    threadgroup float* sh_Out = (threadgroup float*)shmem;
+    #pragma unroll
+    for (int r = 0; r < 4; r++) {
+        #pragma unroll
+        for (int c = 0; c < 4; c++) {
+            simdgroup_store(acc[r][c], &sh_Out[(sg_row_offset + r * 8) * 64 + (sg_col_offset + c * 8)], 64);
+        }
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    #pragma unroll
+    for (int i = 0; i < 32; i++) {
+        uint elem_idx = linear_tid * 32 + i;
+        uint r = elem_idx / 64;
+        uint c = elem_idx % 64;
+        uint global_r = tg_row_start + r;
+        uint global_c = tg_col_start + c;
+        if (global_r < M && global_c < N) {
+            uint h = global_c / D;
+            uint d = global_c % D;
+            uint out_idx = (h * M + global_r) * D + d;
+            C[out_idx] = (half)sh_Out[elem_idx];
+        }
+    }
+}
+
+// ============================================================================
+// MLX 4-BIT DUAL-SIMDGROUP COOPERATIVE SWIGLU MMA ENGINE
+// ============================================================================
+kernel void swiglu_mma_mlx_4bit_dual_simd(
+    device const half*           A          [[buffer(0)]], // [M, K]
+    device const uint8_t*        B_gate_raw [[buffer(1)]], // [N_mlp, K/32] planar
+    device const uint8_t*        B_up_raw   [[buffer(2)]], // [N_mlp, K/32] planar
+    device half*                 Out        [[buffer(3)]], // [M, N_mlp]
+    constant uint&               M          [[buffer(4)]],
+    constant uint&               N_mlp      [[buffer(5)]],
+    constant uint&               K          [[buffer(6)]],
+    threadgroup half*            shmem      [[threadgroup(0)]], // 17408 bytes
+    uint2 tg_id   [[threadgroup_position_in_grid]],
+    uint  simd_lane_id [[thread_index_in_simdgroup]],
+    uint  simd_group_id [[simdgroup_index_in_threadgroup]])
+{
+    uint tg_row_start = tg_id.y * 64;
+    uint tg_col_start = tg_id.x * 32;
+
+    if (tg_row_start >= M || tg_col_start >= N_mlp) return;
+
+    uint linear_tid = simd_group_id * 32 + simd_lane_id;
+
+    typedef half ShATile[64][36];
+    typedef half ShBTile[32][32];
+
+    threadgroup ShATile* sh_A = (threadgroup ShATile*)shmem;
+    threadgroup ShBTile* sh_B_gate = (threadgroup ShBTile*)(shmem + 4608);
+    threadgroup ShBTile* sh_B_up   = (threadgroup ShBTile*)(shmem + 4608 + 2048);
+
+    uint sg_r = simd_group_id / 2;
+    uint sg_c = simd_group_id % 2;
+    uint sg_row_offset = sg_r * 32;
+    uint sg_col_offset = sg_c * 16;
+
+    simdgroup_matrix<float, 8, 8> acc_gate[4][2];
+    simdgroup_matrix<float, 8, 8> acc_up[4][2];
+
+    #pragma unroll
+    for (int r = 0; r < 4; r++) {
+        #pragma unroll
+        for (int c = 0; c < 2; c++) {
+            acc_gate[r][c] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
+            acc_up[r][c]   = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
+        }
+    }
+
+    uint num_k_blocks = K / 32;
+    size_t total_blocks = (size_t)N_mlp * num_k_blocks;
+    mlx_4bit_planar B_gate_planar(B_gate_raw, total_blocks);
+    mlx_4bit_planar B_up_planar(B_up_raw, total_blocks);
+
+    auto load_A_tile = [&](uint buf_idx, uint kb) {
+        #pragma unroll
+        for (int i = 0; i < 2; i++) {
+            uint idx = linear_tid * 2 + i;
+            uint r = idx / 4;
+            uint c = (idx % 4) * 8;
+            uint global_r = tg_row_start + r;
+            uint global_c = kb * 32 + c;
+            float4 val = float4(0.0f);
+            if (global_r < M && global_c < K) {
+                val = *reinterpret_cast<device const float4*>(&A[global_r * K + global_c]);
+            }
+            *reinterpret_cast<threadgroup float2*>(&sh_A[buf_idx][r][c]) = val.xy;
+            *reinterpret_cast<threadgroup float2*>(&sh_A[buf_idx][r][c + 4]) = val.zw;
+        }
+    };
+
+    auto dequant_B_tiles = [&](uint buf_idx, uint kb) {
+        if (linear_tid < 32) {
+            uint col = tg_col_start + linear_tid;
+            if (col < N_mlp && kb < num_k_blocks) {
+                uint blk_idx = col * num_k_blocks + kb;
+                uint4 raw_bits = B_gate_planar.qs[blk_idx];
+                half d = B_gate_planar.scales[blk_idx];
+                half bias = B_gate_planar.biases[blk_idx];
+                half4 hd = half4(d);
+                half4 h_bias = half4(bias);
+
+                uint w0 = raw_bits.x;
+                uint w1 = raw_bits.y;
+                uint w2 = raw_bits.z;
+                uint w3 = raw_bits.w;
+
+                half4 vl[4], vh[4];
+                vl[0] = fma(half4(as_type<uchar4>(w0 & 0x0F0F0F0Fu)), hd, h_bias);
+                vh[0] = fma(half4(as_type<uchar4>((w0 >> 4) & 0x0F0F0F0Fu)), hd, h_bias);
+                vl[1] = fma(half4(as_type<uchar4>(w1 & 0x0F0F0F0Fu)), hd, h_bias);
+                vh[1] = fma(half4(as_type<uchar4>((w1 >> 4) & 0x0F0F0F0Fu)), hd, h_bias);
+                vl[2] = fma(half4(as_type<uchar4>(w2 & 0x0F0F0F0Fu)), hd, h_bias);
+                vh[2] = fma(half4(as_type<uchar4>((w2 >> 4) & 0x0F0F0F0Fu)), hd, h_bias);
+                vl[3] = fma(half4(as_type<uchar4>(w3 & 0x0F0F0F0Fu)), hd, h_bias);
+                vh[3] = fma(half4(as_type<uchar4>((w3 >> 4) & 0x0F0F0F0Fu)), hd, h_bias);
+
+                #pragma unroll
+                for (int i = 0; i < 4; i++) {
+                    sh_B_gate[buf_idx][i * 4 + 0][linear_tid] = vl[i][0];
+                    sh_B_gate[buf_idx][i * 4 + 1][linear_tid] = vl[i][1];
+                    sh_B_gate[buf_idx][i * 4 + 2][linear_tid] = vl[i][2];
+                    sh_B_gate[buf_idx][i * 4 + 3][linear_tid] = vl[i][3];
+                    sh_B_gate[buf_idx][16 + i * 4 + 0][linear_tid] = vh[i][0];
+                    sh_B_gate[buf_idx][16 + i * 4 + 1][linear_tid] = vh[i][1];
+                    sh_B_gate[buf_idx][16 + i * 4 + 2][linear_tid] = vh[i][2];
+                    sh_B_gate[buf_idx][16 + i * 4 + 3][linear_tid] = vh[i][3];
+                }
+            } else {
+                #pragma unroll
+                for (int k = 0; k < 32; k++) {
+                    sh_B_gate[buf_idx][k][linear_tid] = 0.0h;
+                }
+            }
+        } else if (linear_tid >= 32 && linear_tid < 64) {
+            uint up_col_idx = linear_tid - 32;
+            uint col = tg_col_start + up_col_idx;
+            if (col < N_mlp && kb < num_k_blocks) {
+                uint blk_idx = col * num_k_blocks + kb;
+                uint4 raw_bits = B_up_planar.qs[blk_idx];
+                half d = B_up_planar.scales[blk_idx];
+                half bias = B_up_planar.biases[blk_idx];
+                half4 hd = half4(d);
+                half4 h_bias = half4(bias);
+
+                uint w0 = raw_bits.x;
+                uint w1 = raw_bits.y;
+                uint w2 = raw_bits.z;
+                uint w3 = raw_bits.w;
+
+                half4 vl[4], vh[4];
+                vl[0] = fma(half4(as_type<uchar4>(w0 & 0x0F0F0F0Fu)), hd, h_bias);
+                vh[0] = fma(half4(as_type<uchar4>((w0 >> 4) & 0x0F0F0F0Fu)), hd, h_bias);
+                vl[1] = fma(half4(as_type<uchar4>(w1 & 0x0F0F0F0Fu)), hd, h_bias);
+                vh[1] = fma(half4(as_type<uchar4>((w1 >> 4) & 0x0F0F0F0Fu)), hd, h_bias);
+                vl[2] = fma(half4(as_type<uchar4>(w2 & 0x0F0F0F0Fu)), hd, h_bias);
+                vh[2] = fma(half4(as_type<uchar4>((w2 >> 4) & 0x0F0F0F0Fu)), hd, h_bias);
+                vl[3] = fma(half4(as_type<uchar4>(w3 & 0x0F0F0F0Fu)), hd, h_bias);
+                vh[3] = fma(half4(as_type<uchar4>((w3 >> 4) & 0x0F0F0F0Fu)), hd, h_bias);
+
+                #pragma unroll
+                for (int i = 0; i < 4; i++) {
+                    sh_B_up[buf_idx][i * 4 + 0][up_col_idx] = vl[i][0];
+                    sh_B_up[buf_idx][i * 4 + 1][up_col_idx] = vl[i][1];
+                    sh_B_up[buf_idx][i * 4 + 2][up_col_idx] = vl[i][2];
+                    sh_B_up[buf_idx][i * 4 + 3][up_col_idx] = vl[i][3];
+                    sh_B_up[buf_idx][16 + i * 4 + 0][up_col_idx] = vh[i][0];
+                    sh_B_up[buf_idx][16 + i * 4 + 1][up_col_idx] = vh[i][1];
+                    sh_B_up[buf_idx][16 + i * 4 + 2][up_col_idx] = vh[i][2];
+                    sh_B_up[buf_idx][16 + i * 4 + 3][up_col_idx] = vh[i][3];
+                }
+            } else {
+                #pragma unroll
+                for (int k = 0; k < 32; k++) {
+                    sh_B_up[buf_idx][k][up_col_idx] = 0.0h;
+                }
+            }
+        }
+    };
+
+    auto compute_mma = [&](uint buf_idx) {
+        #pragma unroll
+        for (int ks = 0; ks < 4; ks++) {
+            uint k_off = ks * 8;
+            simdgroup_matrix<half, 8, 8> a_frag[4];
+            simdgroup_matrix<half, 8, 8> b_gate_frag[2];
+            simdgroup_matrix<half, 8, 8> b_up_frag[2];
+
+            #pragma unroll
+            for (int r = 0; r < 4; r++) {
+                simdgroup_load(a_frag[r], &sh_A[buf_idx][sg_row_offset + r * 8][k_off], 36);
+            }
+
+            #pragma unroll
+            for (int c = 0; c < 2; c++) {
+                simdgroup_load(b_gate_frag[c], &sh_B_gate[buf_idx][k_off][sg_col_offset + c * 8], 32);
+                simdgroup_load(b_up_frag[c],   &sh_B_up[buf_idx][k_off][sg_col_offset + c * 8], 32);
+            }
+
+            #pragma unroll
+            for (int r = 0; r < 4; r++) {
+                #pragma unroll
+                for (int c = 0; c < 2; c++) {
+                    simdgroup_multiply_accumulate(acc_gate[r][c], a_frag[r], b_gate_frag[c], acc_gate[r][c]);
+                    simdgroup_multiply_accumulate(acc_up[r][c],   a_frag[r], b_up_frag[c],   acc_up[r][c]);
+                }
+            }
+        }
+    };
+
+    load_A_tile(0, 0);
+    dequant_B_tiles(0, 0);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint kb = 0; kb < num_k_blocks; kb++) {
+        uint cur = kb & 1;
+        uint nxt = cur ^ 1;
+        uint next_kb = kb + 1;
+
+        if (next_kb < num_k_blocks) {
+            load_A_tile(nxt, next_kb);
+            dequant_B_tiles(nxt, next_kb);
+        }
+
+        compute_mma(cur);
+
+        if (next_kb < num_k_blocks) {
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+
+    threadgroup float (*sh_Gate)[32] = (threadgroup float (*)[32])shmem;
+    threadgroup float (*sh_Up)[32]   = (threadgroup float (*)[32])(shmem + 4096);
+
+    #pragma unroll
+    for (int r = 0; r < 4; r++) {
+        #pragma unroll
+        for (int c = 0; c < 2; c++) {
+            simdgroup_store(acc_gate[r][c], &sh_Gate[sg_row_offset + r * 8][sg_col_offset + c * 8], 32);
+            simdgroup_store(acc_up[r][c],   &sh_Up[sg_row_offset + r * 8][sg_col_offset + c * 8], 32);
+        }
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    #pragma unroll
+    for (int i = 0; i < 16; i++) {
+        uint elem_idx = linear_tid * 16 + i;
+        uint r = elem_idx / 32;
+        uint c = elem_idx % 32;
+        uint global_r = tg_row_start + r;
+        uint global_c = tg_col_start + c;
+        if (global_r < M && global_c < N_mlp) {
+            float g = sh_Gate[r][c];
+            float u = sh_Up[r][c];
+            float silu_g = g / (1.0f + exp(-g));
+            Out[global_r * N_mlp + global_c] = (half)(silu_g * u);
         }
     }
 }

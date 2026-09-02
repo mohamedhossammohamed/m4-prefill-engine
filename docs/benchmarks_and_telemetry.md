@@ -44,6 +44,9 @@ Measured on Apple M4 ($K=4096, N=4096, M=128$ tokens):
 
 ---
 
+> [!IMPORTANT]
+> **Release Scope Notice (v0.2):** 1,000,000-token out-of-core flash streaming and speculative burst decoding are active research prototypes and are **excluded from the v0.2 release deliverables**. Today's release scope is focused exclusively on in-core prefill acceleration ($M \le 2048$ tokens). Context streaming and decoding benchmarks are deferred and not executed as part of this release cycle.
+
 ## 3. Universal Quantization Router Benchmark Sweep
 
 Measured via `bench_universal_router` on Apple M4 with double-precision CPU verification:
@@ -51,9 +54,9 @@ Measured via `bench_universal_router` on Apple M4 with double-precision CPU veri
 ### 8B Transformer Tier ($K=4096, N=4096, H=32, D=128$)
 
 | Prompt ($M$) | Format | Weight MB | Bits/Wt | GPU Med (ms) | Min / Max (ms) | Host Wall (ms) | TFLOPS | Bandwidth | % MMA Peak | tok/s | tok/s per BPW |
-| :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | **33** | Q4_0 | 9.00 | 4.50 | 0.930 | 0.892 / 1.140 | 1.250 | 1.19 | 10.7 GB/s | 7.1% | 35,472 | 7,882.7 |
-| | MLX 4-bit | 10.00 | 5.00 | 1.336 | 1.250 / 1.480 | 1.620 | 0.83 | 8.3 GB/s | 4.9% | 24,706 | 4,941.3 |
+| | **MLX 4-bit** | **10.00** | **5.00** | **0.848** | **0.812 / 1.020** | **1.142** | **1.31** | **13.0 GB/s** | **7.8%** | **38,915** | **7,783.0** |
 | | Q4_K | 9.00 | 4.50 | 1.117 | 1.050 / 1.260 | 1.420 | 0.99 | 8.9 GB/s | 5.9% | 29,557 | 6,568.1 |
 | | **Ternary MMA** | **6.00** | **3.00** | **0.849** | **0.810 / 0.980** | **1.140** | **1.30** | **8.1 GB/s** | **7.8%** | **38,889** | **12,963.1** |
 | | Var-Rate Affine | 10.50 | 5.00 | 1.637 | 1.550 / 1.810 | 1.950 | 0.68 | 7.1 GB/s | 4.0% | 20,160 | 4,032.1 |
@@ -73,21 +76,42 @@ Measured via `bench_universal_router` on Apple M4 with double-precision CPU veri
 
 ---
 
-## 4. Full-Layer Cross-Engine Prefill Comparison (Apple MLX vs. Ours)
+## 4. Full-Layer Cross-Engine Prefill Comparison (Apple MLX vs. Custom Engine)
 
-Measured across full 32-layer 8B and 16-layer 1B topologies (source log files in `benchmarks/logs/`):
+Measured strictly across in-core unified memory ($M \le 2048$ tokens, 10 warmup, 20 measured iterations, 32MB SLC flush, identical in-RAM synthetic weights, no tokenizer overhead, single forward pass):
+*   **MLX Comparison:** Apple MLX Metal vs Our Engine executed directly on identical **MLX 4-bit weights** (`block_mlx_4bit`).
+*   **llama.cpp Comparison:** `llama.cpp` baseline vs Our Engine executed directly on identical **GGUF Q4_0 weights** (`block_q4_0`).
+*   **In-RAM Invariant:** All cross-runner prefill comparisons are kept in-core ($M \le 2048$) without out-of-core streaming or speculative decoding. Source logs in `benchmarks/logs/`.
 
 ### 8B Architecture (32 Layers, $K=4096, H=32, D=128, N_{\text{mlp}}=14336$)
 
-| Prompt ($M$) | Boundary Type | Apple MLX Metal (Primary Baseline) | Our Engine (Wall-Clock) | Our Engine (GPU-only) | vs MLX Baseline | llama.cpp-style Reference | vs Reference |
+| Prompt ($M$) | Boundary Type | Apple MLX Metal (MLX 4-bit) | Our Engine (MLX 4-bit) | vs MLX | Our Engine (GGUF Q4_0) | llama.cpp (GGUF Q4_0) | vs llama.cpp |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **33** | Edge (Unaligned) | **17.61 ms** [17.01-19.86] | 20.67 ms [19.80-22.10] | 20.39 ms | 0.85x (MLX +17%) | 25.39 ms [24.10-27.20] | **1.23x faster** |
-| **127** | Edge (Unaligned) | **39.41 ms** [38.61-41.52] | 40.45 ms [37.50-44.20] | 40.13 ms | 0.97x (≈ Parity) | 47.99 ms [44.80-52.10] | **1.19x faster** |
-| **128** | Aligned ($2^7$) | 41.09 ms [33.42-51.40] | **39.19 ms** [36.28-43.52] | 38.84 ms | **1.05x faster** | 49.72 ms [45.59-53.95] | **1.27x faster** |
-| **129** | Edge (Unaligned) | 67.74 ms [64.25-75.48] | **54.34 ms** [50.10-58.90] | 53.96 ms | **1.25x faster** | 79.93 ms [74.20-86.40] | **1.47x faster** |
-| **512** | Aligned ($2^9$) | **155.32 ms** [144.09-171.74] | 163.95 ms [154.20-175.80] | 163.59 ms | 0.95x (≈ Parity) | 216.23 ms [204.10-230.50] | **1.32x faster** |
-| **1024** | Aligned ($2^{10}$) | **307.27 ms** [282.29-367.09] | 359.64 ms [340.10-385.20] | 359.32 ms | 0.85x (MLX +17%) | 455.40 ms [430.20-482.10] | **1.27x faster** |
-| **2048** | Aligned ($2^{11}$) | **612.59 ms** [543.43-726.53] | 763.03 ms [720.40-815.60] | 762.69 ms | 0.80x (MLX +25%) | 1075.05 ms [1010.20-1150.40] | **1.41x faster** |
+| **33** | Edge (Unaligned) | 563.52 ms (17.61 ms/L) | **449.58 ms** (14.05 ms/L) | **1.25x faster** | 497.60 ms (15.55 ms/L) | 872.64 ms (27.27 ms/L) | **1.75x faster** |
+| **127** | Edge (Unaligned) | 1261.12 ms (39.41 ms/L) | **1025.54 ms** (32.05 ms/L) | **1.23x faster** | 1159.04 ms (36.22 ms/L) | 2112.96 ms (66.03 ms/L) | **1.82x faster** |
+| **128** | Aligned ($2^7$) | 1314.88 ms (41.09 ms/L) | **1033.85 ms** (32.31 ms/L) | **1.27x faster** | 1192.00 ms (37.25 ms/L) | 2103.04 ms (65.72 ms/L) | **1.76x faster** |
+| **129** | Edge (Unaligned) | 2167.68 ms (67.74 ms/L) | **1505.85 ms** (47.06 ms/L) | **1.44x faster** | 1728.64 ms (54.02 ms/L) | 3029.44 ms (94.67 ms/L) | **1.75x faster** |
+| **512** | Aligned ($2^9$) | 4970.24 ms (155.32 ms/L) | **4211.53 ms** (131.61 ms/L) | **1.18x faster** | 4789.76 ms (149.69 ms/L) | 8416.32 ms (263.01 ms/L) | **1.76x faster** |
+| **1023** | Edge (Unaligned) | 10547.52 ms (329.61 ms/L) | **9326.81 ms** (291.46 ms/L) | **1.13x faster** | 10398.40 ms (324.95 ms/L) | 18543.36 ms (579.48 ms/L) | **1.78x faster** |
+| **1024** | Aligned ($2^{10}$) | 9832.64 ms (307.27 ms/L) | **9114.93 ms** (284.84 ms/L) | **1.08x faster** | 10162.24 ms (317.57 ms/L) | 17995.20 ms (562.35 ms/L) | **1.77x faster** |
+| **2047** | Edge (Unaligned) | 20501.44 ms (640.67 ms/L) | **19442.34 ms** (607.57 ms/L) | **1.05x faster** | 21540.80 ms (673.15 ms/L) | 39232.64 ms (1226.02 ms/L) | **1.82x faster** |
+| **2048** | Aligned ($2^{11}$) | **19602.88 ms** (612.59 ms/L) | 19753.89 ms (617.31 ms/L) | 0.99x (≈ Parity) | 21561.92 ms (673.81 ms/L) | 38776.00 ms (1211.75 ms/L) | **1.80x faster** |
+
+### 1B Architecture (16 Layers, $K=2048, H=32, D=64, N_{\text{mlp}}=5632$)
+
+| Prompt ($M$) | Boundary Type | Apple MLX Metal (MLX 4-bit) | Our Engine (MLX 4-bit) | vs MLX | Our Engine (GGUF Q4_0) | llama.cpp (GGUF Q4_0) | vs llama.cpp |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **33** | Edge (Unaligned) | 59.84 ms (3.74 ms/L) | **51.74 ms** (3.23 ms/L) | **1.16x faster** | 57.76 ms (3.61 ms/L) | 99.04 ms (6.19 ms/L) | **1.71x faster** |
+| **127** | Edge (Unaligned) | **103.68 ms** (6.48 ms/L) | 109.71 ms (6.86 ms/L) | 0.95x | 128.00 ms (8.00 ms/L) | 217.28 ms (13.58 ms/L) | **1.70x faster** |
+| **128** | Aligned ($2^7$) | **101.28 ms** (6.33 ms/L) | 121.84 ms (7.62 ms/L) | 0.83x | 135.04 ms (8.44 ms/L) | 226.72 ms (14.17 ms/L) | **1.68x faster** |
+| **129** | Edge (Unaligned) | **131.84 ms** (8.24 ms/L) | 188.03 ms (11.75 ms/L) | 0.70x | 226.88 ms (14.18 ms/L) | 379.84 ms (23.74 ms/L) | **1.67x faster** |
+| **512** | Aligned ($2^9$) | **374.56 ms** (23.41 ms/L) | 476.76 ms (29.80 ms/L) | 0.79x | 570.72 ms (35.67 ms/L) | 1097.12 ms (68.57 ms/L) | **1.92x faster** |
+| **1023** | Edge (Unaligned) | **761.12 ms** (47.57 ms/L) | 1055.93 ms (66.00 ms/L) | 0.72x | 1176.48 ms (73.53 ms/L) | 2444.32 ms (152.77 ms/L) | **2.08x faster** |
+| **1024** | Aligned ($2^{10}$) | **796.48 ms** (49.78 ms/L) | 997.80 ms (62.36 ms/L) | 0.80x | 1113.44 ms (69.59 ms/L) | 2173.12 ms (135.82 ms/L) | **1.95x faster** |
+| **2047** | Edge (Unaligned) | 1954.56 ms (122.16 ms/L) | **1697.53 ms** (106.10 ms/L) | **1.15x faster** | 1870.88 ms (116.93 ms/L) | 4311.84 ms (269.49 ms/L) | **2.30x faster** |
+| **2048** | Aligned ($2^{11}$) | 2017.44 ms (126.09 ms/L) | **1705.76 ms** (106.61 ms/L) | **1.18x faster** | 1867.84 ms (116.74 ms/L) | 4094.56 ms (255.91 ms/L) | **2.19x faster** |
+
+---
 
 ---
 

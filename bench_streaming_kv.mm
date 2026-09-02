@@ -645,7 +645,7 @@ int main(int argc, const char* argv[]) {
                     rec.tflops = tflops;
                     rec.ssd_bw_gbps = 0.0;
                     rec.peak_rss_mb = peak_rss;
-                    rec.max_diff = 0.0f;
+                    rec.max_diff = -1.0f;
                     all_records.push_back(rec);
 
                     std::stringstream lat_ss, tf_ss, rss_ss;
@@ -659,7 +659,7 @@ int main(int argc, const char* argv[]) {
                               << std::setw(14) << tf_ss.str()
                               << std::setw(16) << "N/A (In-RAM)"
                               << std::setw(16) << rss_ss.str()
-                              << std::setw(14) << "0.000000"
+                              << std::setw(14) << "N/A (GPU-Only)"
                               << std::setw(12) << "[LOCKED]"
                               << std::endl;
 
@@ -745,7 +745,7 @@ int main(int argc, const char* argv[]) {
                     rec.tflops = tflops;
                     rec.ssd_bw_gbps = 0.0;
                     rec.peak_rss_mb = peak_rss;
-                    rec.max_diff = 0.0f;
+                    rec.max_diff = -1.0f;
                     all_records.push_back(rec);
 
                     std::stringstream lat_ss, tf_ss, rss_ss;
@@ -759,7 +759,7 @@ int main(int argc, const char* argv[]) {
                               << std::setw(14) << tf_ss.str()
                               << std::setw(16) << "N/A (In-RAM)"
                               << std::setw(16) << rss_ss.str()
-                              << std::setw(14) << "0.000000"
+                              << std::setw(14) << "N/A (GPU-Only)"
                               << std::setw(12) << "[LOCKED]"
                               << std::endl;
 
@@ -887,7 +887,7 @@ int main(int argc, const char* argv[]) {
                     rec.tflops = tflops;
                     rec.ssd_bw_gbps = ssd_bw;
                     rec.peak_rss_mb = peak_rss;
-                    rec.max_diff = 0.0f;
+                    rec.max_diff = -1.0f;
                     all_records.push_back(rec);
 
                     std::stringstream lat_ss, tf_ss, bw_ss, rss_ss;
@@ -902,7 +902,7 @@ int main(int argc, const char* argv[]) {
                               << std::setw(14) << tf_ss.str()
                               << std::setw(16) << bw_ss.str()
                               << std::setw(16) << rss_ss.str()
-                              << std::setw(14) << "0.000000"
+                              << std::setw(14) << "N/A (GPU-Only)"
                               << std::setw(12) << "[LOCKED]"
                               << std::endl;
 
@@ -1029,7 +1029,7 @@ int main(int argc, const char* argv[]) {
                     rec.tflops = tflops;
                     rec.ssd_bw_gbps = ssd_bw;
                     rec.peak_rss_mb = peak_rss;
-                    rec.max_diff = 0.0f;
+                    rec.max_diff = -1.0f;
                     all_records.push_back(rec);
 
                     std::stringstream lat_ss, tf_ss, bw_ss, rss_ss;
@@ -1044,7 +1044,7 @@ int main(int argc, const char* argv[]) {
                               << std::setw(14) << tf_ss.str()
                               << std::setw(16) << bw_ss.str()
                               << std::setw(16) << rss_ss.str()
-                              << std::setw(14) << "0.000000"
+                              << std::setw(14) << "N/A (GPU-Only)"
                               << std::setw(12) << "[LOCKED]"
                               << std::endl;
 

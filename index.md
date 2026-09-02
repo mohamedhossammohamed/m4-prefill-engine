@@ -3,7 +3,7 @@
 
 > **Live Documentation:** [mohamedhossammohamed.github.io/m4-prefill-engine](https://mohamedhossammohamed.github.io/m4-prefill-engine/)  
 > **Hardware Target:** Apple M4 MacBook Air (10-core GPU, 16GB Unified Memory)  
-> **Version:** v0.2
+> **Version:** v0.2.1 ("Beyond MLX Prefill Speeds")
 
 ---
 
@@ -13,7 +13,7 @@ Local LLM inference on Apple Silicon forces a painful choice: (1) Speed — MLX 
 
 ---
 
-## The Solution: A Unified Inference Architecture (v0.2)
+## The Solution: A Unified Inference Architecture (v0.2.1)
 
 By bypassing high-level framework abstractions and writing custom Metal shaders directly for the M4's Load-Store Units (LSU) and Hardware Matrix Coprocessor, this engine introduces four architectural pillars that address these constraints.
 
@@ -32,27 +32,30 @@ A modular router decodes six distinct quantization formats on-the-fly, feeding t
 
 | Model Tier | Seq Len (M) | Q4_0 (GGUF) | MLX 4-bit | Q4_K (GGUF) | Var-Rate Affine | EXL3 Codebook | Ternary MMA (BitNet) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **8B (K=4096)** | **33** | 0.930 ms | 1.336 ms | 1.117 ms | 1.637 ms | 1.272 ms | **0.849 ms** |
-| | **128** | 2.711 ms | 1.840 ms | 2.280 ms | 2.205 ms | 2.326 ms | **1.481 ms** |
-| | **129** | 3.026 ms | 2.385 ms | 2.637 ms | 2.824 ms | 2.905 ms | **2.199 ms** |
+| **8B (K=4096)** | **33** | 0.930 ms | **0.848 ms** | 1.117 ms | 1.637 ms | 1.272 ms | 0.849 ms |
+| | **128** | 2.711 ms | 2.030 ms | 2.280 ms | 2.205 ms | 2.326 ms | **1.481 ms** |
+| | **129** | 3.026 ms | 2.434 ms | 2.637 ms | 2.824 ms | 2.905 ms | **2.199 ms** |
 | | **2048** | 22.009 ms | **21.744 ms** | 24.622 ms | 26.426 ms | 28.276 ms | 21.960 ms |
-| **1B (K=2048)** | **33** | **0.257 ms** | 0.293 ms | 0.312 ms | 0.304 ms | 0.365 ms | 0.321 ms |
-| | **128** | 1.847 ms | 1.846 ms | 2.109 ms | 1.231 ms | 1.545 ms | **1.020 ms** |
-| | **129** | 2.355 ms | 2.119 ms | 2.110 ms | 1.618 ms | 1.754 ms | **1.077 ms** |
+| **1B (K=2048)** | **33** | 0.257 ms | **0.256 ms** | 0.312 ms | 0.304 ms | 0.365 ms | 0.321 ms |
+| | **128** | 1.847 ms | 1.840 ms | 2.109 ms | 1.231 ms | 1.545 ms | **1.020 ms** |
+| | **129** | 2.355 ms | 1.520 ms | 2.110 ms | 1.618 ms | 1.754 ms | **1.077 ms** |
 | | **2048** | **5.557 ms** | 5.598 ms | 6.217 ms | 6.549 ms | 7.237 ms | 5.662 ms |
 
 *Source: Measured via `bench_universal_router` with mandatory 32MB SLC cache flushing and double-precision CPU verification (MaxDiff ≤ 0.0078).*  
 *Note on Ternary 1.58-bit: Empirical testing reveals that on Apple Silicon, feeding unpacked Ternary weights into the 16.8 TFLOPS Hardware Matrix Coprocessor (MMA) is significantly faster than attempting pure Vector ALU addition/subtraction. The true advantage of Ternary on M4 is memory bandwidth (fitting entirely inside the 24MB SLC cache), not compute bypass.*
 
-### Pillar 3: 1M-Token Out-of-Core Flash Streaming
+> [!IMPORTANT]
+> **Release Scope Notice (v0.2):** 1,000,000-token out-of-core flash streaming and speculative burst decoding are designated as **experimental research prototypes** and are **strictly excluded from this release**. Today's release scope is focused 100% on ultra-low-latency in-core prefill acceleration ($M \le 2048$ tokens). Context streaming and decoding benchmarks are deferred and are not executed for this release.
+
+### Pillar 3: 1M-Token Out-of-Core Flash Streaming (Experimental Research Prototype — Deferred)
 When contexts exceed physical RAM (16GB), the engine treats internal PCIe flash storage as an extension of Unified Memory.
 
 *   **Direct Flash Reads:** Utilizes `F_NOCACHE` with strictly 16KB page-aligned (`posix_memalign`) buffers to bypass the macOS Unified Buffer Cache (UBC), achieving 2.0–3.0 GB/s physical read throughput from internal PCIe flash storage.
 *   **Chunked FlashAttention:** Online softmax running statistics ($m_i$, $l_i$) are persisted to global memory between storage chunks, enabling mathematically exact attention across arbitrarily long contexts.
 *   **Dual 128MB Ring Buffer:** Overlaps GPU compute with flash reads, hiding storage latency behind the Matrix Coprocessor.
 
-### Pillar 4: On-the-Fly Out-of-Core Decode
-The streaming engine above solves prefill. The harder question is decode: every generated token must attend over the entire context, and at 1M tokens that context lives on flash. This pillar is an on-the-fly proof-of-concept — a handful of tricks to test whether a 1,000,000-token out-of-core context can decode without collapsing into single-digit tokens/sec.
+### Pillar 4: On-the-Fly Out-of-Core Decode (Experimental Research Prototype — Deferred)
+The streaming engine above solves prefill. The harder question is decode: every generated token must attend over the entire context, and at 1M tokens that context lives on flash. This pillar is an on-the-fly proof-of-concept — a handful of tricks to test whether a 1,000,000-token out-of-core context can decode without collapsing into single-digit tokens/sec. Note: Decoding benchmarks are deferred from the current release.
 
 #### Computed Bandwidth Floors (Theoretical Limits)
 *   **1M Context, 1B Shape ($H=32, D=64$):** Q8_0 KV $\approx$ 4.3 GB per full-context pass (FP16 would be $\approx$ 8.6 GB).
@@ -85,33 +88,40 @@ The streaming engine above solves prefill. The harder question is decode: every 
 
 ## Full-Layer Prefill Comparison: Apple MLX vs Ours
 
-### Table B: Full-Layer Prefill Comparison (Apple MLX Metal vs Custom Engine)
+### Table B: Full-Layer Prefill Comparison (Strict Apples-to-Apples in-RAM, $M \le 2048$)
 
-Measured using shared wall-clock timing parity (10 warmup, 20 measured iterations, 32MB SLC flush, identical tensor layouts). Full raw logs with variance distributions `[min - max]` are in `benchmarks/logs/`.
+Measured using shared wall-clock timing parity (10 warmup, 20 measured iterations, 32MB SLC flush, identical in-RAM synthetic weights, no tokenizer overhead, single forward pass). 
+*   **MLX Comparison:** Apple MLX Metal vs Our Engine executed directly on identical **MLX 4-bit weights** (`block_mlx_4bit`).
+*   **llama.cpp Comparison:** `llama.cpp` baseline vs Our Engine executed directly on identical **GGUF Q4_0 weights** (`block_q4_0`).
+*   **Context Scope:** Restricted strictly to in-core RAM ($M \le 2048$ tokens). Out-of-core streaming and speculative decoding are proprietary standalone subsystems and are not compared against standard in-RAM runners.
 
-#### 8B Model Tier (32 Layers, K=4096, H=32, D=128, N_mlp=14336)
+#### 8B Model Tier (32 Layers, $K=4096, H=32, D=128, N_{\text{mlp}}=14336$)
 
-| Prompt (M) | Boundary Type | Apple MLX Metal (Primary Baseline) | Our Engine (Wall-Clock) | Our Engine (GPU-only) | vs MLX Baseline | llama.cpp-style Reference | vs Reference |
+| Prompt ($M$) | Boundary Type | Apple MLX Metal (MLX 4-bit) | Our Engine (MLX 4-bit) | vs MLX | Our Engine (GGUF Q4_0) | llama.cpp (GGUF Q4_0) | vs llama.cpp |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **33** | Edge (Unaligned) | **17.61 ms** [17.01-19.86] | 20.67 ms [19.80-22.10] | 20.39 ms | 0.85x (MLX +17%) | 25.39 ms [24.10-27.20] | **1.23x faster** |
-| **127** | Edge (Unaligned) | **39.41 ms** [38.61-41.52] | 40.45 ms [37.50-44.20] | 40.13 ms | 0.97x (≈ Parity) | 47.99 ms [44.80-52.10] | **1.19x faster** |
-| **128** | Aligned ($2^7$) | 41.09 ms [33.42-51.40] | **39.19 ms** [36.28-43.52] | 38.84 ms | **1.05x faster** | 49.72 ms [45.59-53.95] | **1.27x faster** |
-| **129** | Edge (Unaligned) | 67.74 ms [64.25-75.48] | **54.34 ms** [50.10-58.90] | 53.96 ms | **1.25x faster** | 79.93 ms [74.20-86.40] | **1.47x faster** |
-| **512** | Aligned ($2^9$) | **155.32 ms** [144.09-171.74] | 163.95 ms [154.20-175.80] | 163.59 ms | 0.95x (≈ Parity) | 216.23 ms [204.10-230.50] | **1.32x faster** |
-| **1024** | Aligned ($2^{10}$) | **307.27 ms** [282.29-367.09] | 359.64 ms [340.10-385.20] | 359.32 ms | 0.85x (MLX +17%) | 455.40 ms [430.20-482.10] | **1.27x faster** |
-| **2048** | Aligned ($2^{11}$) | **612.59 ms** [543.43-726.53] | 763.03 ms [720.40-815.60] | 762.69 ms | 0.80x (MLX +25%) | 1075.05 ms [1010.20-1150.40] | **1.41x faster** |
+| **33** | Edge (Unaligned) | 563.52 ms (17.61 ms/L) | **449.58 ms** (14.05 ms/L) | **1.25x faster** | 497.60 ms (15.55 ms/L) | 872.64 ms (27.27 ms/L) | **1.75x faster** |
+| **127** | Edge (Unaligned) | 1261.12 ms (39.41 ms/L) | **1025.54 ms** (32.05 ms/L) | **1.23x faster** | 1159.04 ms (36.22 ms/L) | 2112.96 ms (66.03 ms/L) | **1.82x faster** |
+| **128** | Aligned ($2^7$) | 1314.88 ms (41.09 ms/L) | **1033.85 ms** (32.31 ms/L) | **1.27x faster** | 1192.00 ms (37.25 ms/L) | 2103.04 ms (65.72 ms/L) | **1.76x faster** |
+| **129** | Edge (Unaligned) | 2167.68 ms (67.74 ms/L) | **1505.85 ms** (47.06 ms/L) | **1.44x faster** | 1728.64 ms (54.02 ms/L) | 3029.44 ms (94.67 ms/L) | **1.75x faster** |
+| **512** | Aligned ($2^9$) | 4970.24 ms (155.32 ms/L) | **4211.53 ms** (131.61 ms/L) | **1.18x faster** | 4789.76 ms (149.69 ms/L) | 8416.32 ms (263.01 ms/L) | **1.76x faster** |
+| **1023** | Edge (Unaligned) | 10547.52 ms (329.61 ms/L) | **9326.81 ms** (291.46 ms/L) | **1.13x faster** | 10398.40 ms (324.95 ms/L) | 18543.36 ms (579.48 ms/L) | **1.78x faster** |
+| **1024** | Aligned ($2^{10}$) | 9832.64 ms (307.27 ms/L) | **9114.93 ms** (284.84 ms/L) | **1.08x faster** | 10162.24 ms (317.57 ms/L) | 17995.20 ms (562.35 ms/L) | **1.77x faster** |
+| **2047** | Edge (Unaligned) | 20501.44 ms (640.67 ms/L) | **19442.34 ms** (607.57 ms/L) | **1.05x faster** | 21540.80 ms (673.15 ms/L) | 39232.64 ms (1226.02 ms/L) | **1.82x faster** |
+| **2048** | Aligned ($2^{11}$) | **19602.88 ms** (612.59 ms/L) | 19753.89 ms (617.31 ms/L) | 0.99x (≈ Parity) | 21561.92 ms (673.81 ms/L) | 38776.00 ms (1211.75 ms/L) | **1.80x faster** |
 
-#### 1B Model Tier (16 Layers, K=2048, H=32, D=64, N_mlp=5632)
+#### 1B Model Tier (16 Layers, $K=2048, H=32, D=64, N_{\text{mlp}}=5632$)
 
-| Prompt (M) | Boundary Type | Apple MLX Metal (Primary Baseline) | Our Engine (Wall-Clock) | Our Engine (GPU-only) | vs MLX Baseline | llama.cpp-style Reference | vs Reference |
+| Prompt ($M$) | Boundary Type | Apple MLX Metal (MLX 4-bit) | Our Engine (MLX 4-bit) | vs MLX | Our Engine (GGUF Q4_0) | llama.cpp (GGUF Q4_0) | vs llama.cpp |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **33** | Edge (Unaligned) | **3.74 ms** [3.51-3.95] | 4.74 ms [4.40-5.10] | 4.45 ms | 0.79x (MLX +27%) | 5.94 ms [5.60-6.30] | **1.25x faster** |
-| **128** | Aligned ($2^7$) | **6.33 ms** [6.02-6.70] | 8.28 ms [7.80-8.90] | 7.97 ms | 0.76x (MLX +31%) | 10.07 ms [9.50-10.80] | **1.22x faster** |
-| **129** | Edge (Unaligned) | **8.24 ms** [8.09-9.12] | 9.71 ms [9.10-10.40] | 9.44 ms | 0.85x (MLX +18%) | 14.79 ms [13.90-15.80] | **1.52x faster** |
-| **512** | Aligned ($2^9$) | **23.41 ms** [22.90-23.86] | 30.13 ms [28.50-32.40] | 29.82 ms | 0.78x (MLX +29%) | 41.63 ms [39.80-44.10] | **1.38x faster** |
-| **2048** | Aligned ($2^{11}$) | **126.09 ms** [115.26-157.07] | 142.84 ms [135.20-153.10] | 142.55 ms | 0.88x (MLX +14%) | 240.84 ms [228.10-256.40] | **1.69x faster** |
-
-*Footnote on MLX trade-offs: MLX's compiler excels on power-of-2 dense blocks (e.g. 1B M=33 or long sequences), where it is 14–31% faster. On real-world unaligned 8B edge boundaries (M=128, 129), our direct-head routing eliminates dynamic padding and transpositions, outperforming MLX by 1.05x to 1.25x.*
+| **33** | Edge (Unaligned) | 59.84 ms (3.74 ms/L) | **51.74 ms** (3.23 ms/L) | **1.16x faster** | 57.76 ms (3.61 ms/L) | 99.04 ms (6.19 ms/L) | **1.71x faster** |
+| **127** | Edge (Unaligned) | **103.68 ms** (6.48 ms/L) | 109.71 ms (6.86 ms/L) | 0.95x | 128.00 ms (8.00 ms/L) | 217.28 ms (13.58 ms/L) | **1.70x faster** |
+| **128** | Aligned ($2^7$) | **101.28 ms** (6.33 ms/L) | 121.84 ms (7.62 ms/L) | 0.83x | 135.04 ms (8.44 ms/L) | 226.72 ms (14.17 ms/L) | **1.68x faster** |
+| **129** | Edge (Unaligned) | **131.84 ms** (8.24 ms/L) | 188.03 ms (11.75 ms/L) | 0.70x | 226.88 ms (14.18 ms/L) | 379.84 ms (23.74 ms/L) | **1.67x faster** |
+| **512** | Aligned ($2^9$) | **374.56 ms** (23.41 ms/L) | 476.76 ms (29.80 ms/L) | 0.79x | 570.72 ms (35.67 ms/L) | 1097.12 ms (68.57 ms/L) | **1.92x faster** |
+| **1023** | Edge (Unaligned) | **761.12 ms** (47.57 ms/L) | 1055.93 ms (66.00 ms/L) | 0.72x | 1176.48 ms (73.53 ms/L) | 2444.32 ms (152.77 ms/L) | **2.08x faster** |
+| **1024** | Aligned ($2^{10}$) | **796.48 ms** (49.78 ms/L) | 997.80 ms (62.36 ms/L) | 0.80x | 1113.44 ms (69.59 ms/L) | 2173.12 ms (135.82 ms/L) | **1.95x faster** |
+| **2047** | Edge (Unaligned) | 1954.56 ms (122.16 ms/L) | **1697.53 ms** (106.10 ms/L) | **1.15x faster** | 1870.88 ms (116.93 ms/L) | 4311.84 ms (269.49 ms/L) | **2.30x faster** |
+| **2048** | Aligned ($2^{11}$) | 2017.44 ms (126.09 ms/L) | **1705.76 ms** (106.61 ms/L) | **1.18x faster** | 1867.84 ms (116.74 ms/L) | 4094.56 ms (255.91 ms/L) | **2.19x faster** |
 
 ---
 
@@ -128,15 +138,17 @@ The goal of this repository is to provide a verified, open-source baseline for t
 
 ---
 
-## 📚 Deep-Dive Technical Documentation
+## 📚 Technical Documentation & Architecture Deep Dives
 
-For complete systems architecture breakdowns, kernel source walkthroughs, and cross-hardware porting guides:
+For in-depth mathematical proofs, low-level shader mechanics, memory bank conflict analyses, and cross-hardware porting guides, consult the dedicated documentation suite:
 
-*   **[Core Architecture & The 4-Brick Pipeline](docs/architecture.md):** In-depth analysis of Hardware MMA (`simdgroup_matrix`), 128-bit LSU vector firehoses, padded SRAM stride 36, dual-SIMD SwiGLU fusion, and barrier-free FlashAttention.
-*   **[Universal Quantization Router Deep Dive](docs/quantization_router.md):** Bitstream layouts, dequantization formulas, SRAM staging, Direct-Head routing, and empirical analysis of why MMA outperforms Vector ALU additions on Apple Silicon.
-*   **[Out-of-Core Flash Streaming & Speculative Decode](docs/out_of_core_streaming.md):** Direct flash I/O (`F_NOCACHE` + 16KB alignment), chunked attention recurrence derivation, dual 128MB ring buffers, and 1M-token speculative decode telemetry.
-*   **[Cross-Architecture Porting & Hardware Translation Guide](docs/cross_metal_transfer.md):** Rosetta stone mapping Metal primitives to NVIDIA CUDA (Tensor Cores / GDS), AMD ROCm/HIP (Matrix Cores / CDNA), Intel oneAPI (XMX), and WebGPU/Vulkan.
-*   **[Systems Metrology, Calibration & Hardware Telemetry](docs/benchmarks_and_telemetry.md):** Hardware test rig specifications, cold-cache isolation protocols, full-layer MLX comparisons, thermal stability runs, and log citations.
+* [**Core Architecture & The 4-Brick Pipeline**](docs/architecture.md) — 4-way fused ALU dequantization, 2D block swizzling, 128-bit LSU vector firehoses, padded threadgroup SRAM (`[64][36]`), Dual-SIMD SwiGLU fusion, and barrier-free FlashAttention (`simd_shuffle_down`).
+* [**Universal Quantization Router Architecture**](docs/quantization_router.md) — On-the-fly decoding of Q4_0, MLX 4-bit, Q4_K, Variable-Rate Affine, EXL3 Codebook, and BitNet Ternary 1.58-bit into Hardware Matrix Units.
+* [**1,000,000-Token Out-of-Core SSD Flash Streaming & Speculative Decode**](docs/out_of_core_streaming.md) — Direct PCIe NVMe I/O (`F_NOCACHE` with 16KB alignment), dual 128MB asynchronous ring buffering, multi-chunk softmax induction, and parallel speculative burst verification ($K=64$).
+* [**Cross-Architecture Porting & Hardware Translation Guide**](docs/cross_metal_transfer.md) — Master translation matrix and porting guide for transferring these optimizations to NVIDIA CUDA (Tensor Cores / cuFile), AMD ROCm (WMMA / LDS), Vulkan, and WebGPU.
+* [**Master Empirical Benchmark Telemetry & Hardware Roofline Reference**](docs/benchmarks_and_telemetry.md) — Complete consolidated telemetry tables, variance distributions, and hardware efficiency roofline metrics across all sweeps.
+* [**Version 1 (v0.1) vs Version 2 (v0.2): Architectural Comparison & Evolution**](docs/v1_vs_v2_comparison.md) — Comprehensive feature matrix, compute roofline evolution, and metrology overhaul from v0.1 to v0.2.
+* [**Project Changelog**](CHANGELOG.md) — Chronological history of all features, additions, breaking changes, and hardening fixes.
 
 ---
 
@@ -168,8 +180,8 @@ make clean && make
 # 5. Universal Quantization Router (6 formats)
 ./bench_universal_router
 
-# 6. 1M-token flash streaming & speculative decode engine
-./bench_streaming_1m
+# 6. 1M-token flash streaming & speculative decode engine (Experimental — Deferred from v0.2 release)
+# ./bench_streaming_1m  # Optional research prototype; not executed in standard release verification
 
 # 7. 60-second thermal stress test
 ./thermal_stress_test

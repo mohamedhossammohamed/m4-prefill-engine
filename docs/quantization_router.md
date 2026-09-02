@@ -83,18 +83,17 @@ inline void unpack_q4_0_block(block_q4_0 blk, thread half4 vl[4], thread half4 v
 ---
 
 ### 2. MLX 4-Bit (Apple MLX Affine 4-Bit)
-*   **Block Size:** 64 elements.
-*   **Weight Footprint:** 40 bytes per block (32 bytes packed nibbles + 2 bytes FP16 scale + 2 bytes FP16 bias + 4 bytes padding).
+*   **Block Size:** 32 elements.
+*   **Weight Footprint:** 20 bytes per block (16 bytes packed nibbles + 2 bytes FP16 scale + 2 bytes FP16 bias).
 *   **Effective Bit-Depth:** 5.00 bits/weight.
 *   **Dequantization Formula:**
-    $$w_i = q_i \times d + b$$
+    $$w_i = q_i \times d + \text{bias}$$
 
 ```metal
 struct block_mlx_4bit {
     half d;          // FP16 Scale Factor (2 bytes)
-    half b;          // FP16 Bias Factor  (2 bytes)
-    uint8_t qs[32];  // 64 packed 4-bit nibbles (32 bytes)
-    uint8_t pad[4];  // 16-byte struct alignment padding (4 bytes)
+    half bias;       // FP16 Bias Factor  (2 bytes)
+    uint8_t qs[16];  // 32 packed 4-bit nibbles (16 bytes)
 };
 ```
 
@@ -108,27 +107,31 @@ struct block_mlx_4bit {
     $$w_i = (q_i - 8) \times d_{\text{global}} \times s_{\text{sub}}$$
 
 ```metal
-struct block_q4_k {
-    half d;            // Global super-block scale
-    half dmin;         // Global super-block minimum scale
-    uint8_t scales[12];// Packed 6-bit sub-block scales
-    uint8_t qs[128];   // 256 packed 4-bit nibbles
+struct block_q4_K {
+    half d;            // Global super-block scale (2 bytes)
+    half dmin;         // Global super-block minimum scale (2 bytes)
+    uint8_t scales[12];// Packed 6-bit sub-block scales/mins (12 bytes)
+    uint8_t qs[128];   // 256 packed 4-bit nibbles (128 bytes)
 };
 ```
 
 ---
 
 ### 4. Grouped Variable-Rate Affine (EXL2-Style)
-*   **Block Size:** 256 elements.
+*   **Block Size:** 256 elements (8 sub-blocks of 32 elements).
 *   **Weight Footprint:** 160 bytes per super-block (mixed bit-depth streams: 3-bit, 4-bit, and 5-bit sub-blocks).
 *   **Effective Bit-Depth:** 5.00 bits/weight.
-*   **Architecture:** Grouped affine quantization with variable bit-depths. *(Note: This is grouped variable-rate affine quantization, not the ExLlamaV2 G-matrix codebook format).*
+*   **Architecture:** Grouped affine quantization with variable bit-depths and permutation modes.
 
 ```metal
 struct block_var_rate_affine {
-    half scales[4];     // 4 FP16 sub-block scales (8 bytes)
-    half biases[4];     // 4 FP16 sub-block biases (8 bytes)
-    uint8_t bitstream[144]; // Packed variable-rate stream (3-bit/4-bit/5-bit)
+    half d;              // Super-block global scale (2 bytes)
+    half bias;           // Super-block global bias (2 bytes)
+    uint8_t scales[8];   // 8 x sub-block scales (8 bytes)
+    uint8_t biases[8];   // 8 x sub-block biases (8 bytes)
+    uint8_t modes[8];    // 8 x sub-block mode & permutation metadata (8 bytes)
+    uint8_t _pad[12];    // Alignment padding to 160 bytes (12 bytes)
+    uint8_t qs[128];     // Multi-bit packed quant payload stream (128 bytes)
 };
 ```
 
@@ -138,15 +141,17 @@ struct block_var_rate_affine {
 *   **Block Size:** 256 elements.
 *   **Weight Footprint:** 144 bytes per super-block.
 *   **Effective Bit-Depth:** 4.50 bits/weight.
-*   **Architecture:** Hierarchical vector codebook centroids ($16 \times 4\text{D}$ codebook), 4-bit vector indices, sub-block residual corrections, and FP16 global scale/bias.
+*   **Architecture:** Hierarchical vector codebook centroids ($16 \times 4\text{D}$ codebook), 3-bit packed indices, sub-block residual corrections, and FP16 global scale/bias.
 
 ```metal
 struct block_exl3 {
-    half scale;         // Global FP16 scale
-    half bias;          // Global FP16 bias
-    uint8_t sub_scales[8]; // 8 sub-block scale multipliers
-    uint8_t centroids[16]; // 16 vector centroid indices
-    uint8_t indices[112];  // Packed 4-bit hierarchical vector indices
+    half d;              // Super-block global scale (2 bytes)
+    half bias;           // Super-block global bias (2 bytes)
+    uint8_t scales[8];   // 8 x sub-block scales (8 bytes)
+    uint8_t residuals[8];// 8 x sub-block residual scales (8 bytes)
+    int8_t codebook[16]; // 16 x hierarchical vector codebook centroids (16 bytes)
+    uint8_t _pad[12];    // Alignment padding to 144 bytes (12 bytes)
+    uint8_t qs[96];      // 256 x 3-bit packed index streams (96 bytes = 8 x 12 bytes)
 };
 ```
 
@@ -160,9 +165,9 @@ struct block_exl3 {
 
 ```metal
 struct block_ternary_1_58 {
-    half scale;        // FP16 scale factor (2 bytes)
-    uint8_t pad[2];    // 4-byte struct alignment padding (2 bytes)
-    uint8_t qs[8];     // 32 packed 2-bit ternary trits (8 bytes)
+    half d;              // Shared FP16 scale factor (2 bytes)
+    half _pad;           // 4-byte struct alignment padding (2 bytes)
+    uint32_t qs[2];      // 2 x 32-bit = 64 bits = 32 x 2-bit weights in {-1, 0, +1} (8 bytes)
 };
 ```
 

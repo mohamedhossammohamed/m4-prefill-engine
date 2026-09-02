@@ -6,6 +6,15 @@ flash_attn_bench
 unified_prefill_engine
 thermal_stress_test
 bench_8b_engine
+bench_streaming_1m
+bench_streaming_kv
+bench_universal_router
+bench_all_scales
+brick1_micro_bench
+brick2_fused_bench
+brick3_swiglu_bench
+brick4_attn_bench
+simd_matrix_bench
 *.o
 *.dylib
 *.air
@@ -14,3 +23,9 @@ bench_8b_engine
 # macOS
 .DS_Store
 *.dSYM/
+.tmp*
+/tmp/
+
+# Agent Knowledge & Internal Protocols (Excluded from Git tracking)
+agents/
+

@@ -128,6 +128,18 @@ The goal of this repository is to provide a verified, open-source baseline for t
 
 ---
 
+## 📚 Deep-Dive Technical Documentation
+
+For complete systems architecture breakdowns, kernel source walkthroughs, and cross-hardware porting guides:
+
+*   **[Core Architecture & The 4-Brick Pipeline](docs/architecture.md):** In-depth analysis of Hardware MMA (`simdgroup_matrix`), 128-bit LSU vector firehoses, padded SRAM stride 36, dual-SIMD SwiGLU fusion, and barrier-free FlashAttention.
+*   **[Universal Quantization Router Deep Dive](docs/quantization_router.md):** Bitstream layouts, dequantization formulas, SRAM staging, Direct-Head routing, and empirical analysis of why MMA outperforms Vector ALU additions on Apple Silicon.
+*   **[Out-of-Core Flash Streaming & Speculative Decode](docs/out_of_core_streaming.md):** Direct flash I/O (`F_NOCACHE` + 16KB alignment), chunked attention recurrence derivation, dual 128MB ring buffers, and 1M-token speculative decode telemetry.
+*   **[Cross-Architecture Porting & Hardware Translation Guide](docs/cross_metal_transfer.md):** Rosetta stone mapping Metal primitives to NVIDIA CUDA (Tensor Cores / GDS), AMD ROCm/HIP (Matrix Cores / CDNA), Intel oneAPI (XMX), and WebGPU/Vulkan.
+*   **[Systems Metrology, Calibration & Hardware Telemetry](docs/benchmarks_and_telemetry.md):** Hardware test rig specifications, cold-cache isolation protocols, full-layer MLX comparisons, thermal stability runs, and log citations.
+
+---
+
 ## Building and Running
 
 ### Prerequisites

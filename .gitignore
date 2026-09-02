@@ -14,3 +14,8 @@ bench_8b_engine
 # macOS
 .DS_Store
 *.dSYM/
+attn_sg_bench
+mlp_bench
+sgprobe
+roofline_probe
+occupancy_probe

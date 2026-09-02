@@ -1,0 +1,48 @@
+m3-ultra-prefill-engine
+=======================
+
+This work is a derivative of the m4-prefill-engine by Mohammed Hossam:
+
+    https://github.com/mohamedhossammohamed/m4-prefill-engine
+    Copyright 2026 Mohammed Hossam
+    Licensed under the Apache License, Version 2.0
+
+The upstream engine, its benchmark harness, its CPU FP32 gold reference and its
+numerical-verification suite are the original author's work. Please cite the
+original repository and author for any use of this code.
+
+--------------------------------------------------------------------------------
+Modifications (Apache License 2.0, section 4(b))
+--------------------------------------------------------------------------------
+
+Derived from upstream commit ab01b63. Modified in 2026 by MSW Lab AI to port the
+8B prefill path to Apple M3 Ultra (80-core GPU). Every upstream kernel is retained
+and remains selectable at runtime; no upstream kernel was deleted or altered.
+
+Modified files:
+
+  unified_8b_kernels.metal
+      ADDED simdgroup_matrix kernels: flash_attn_sg_causal_d128,
+      flash_attn_sg_q8_0_causal_d128, sg_gemm_q4_0, sg_gemm_q4_0_fused_swiglu,
+      sg_qkv_head_gemm_q4_0, plus tile-sweep variants retained for reproducibility.
+      All pre-existing kernels are byte-for-byte unchanged.
+
+  bench_8b_engine.mm
+      ADDED runtime kernel selection via the M3_SG_ATTN and M3_SG_GEMM environment
+      variables, and the dispatch geometry (threadgroup size, threadgroup memory,
+      grid) each selection requires. Setting both to 0 restores the upstream
+      behaviour exactly, including its measured baseline timings.
+
+  README.md
+      APPENDED the section "M3 Ultra Support & Tuning Notes". No upstream text
+      was changed or removed.
+
+New files authored by MSW Lab AI:
+
+  attn_sg_bench.mm        isolated attention A/B harness + CPU FP32 reference
+  mlp_bench.mm            isolated MLP A/B harness (fused/unfused, scalar/simdgroup)
+  sgprobe.mm              MSL simdgroup_matrix capability probe
+  M3_ULTRA_FINDINGS.md    per-phase measurements, negative results, written summary
+  NOTICE                  this file
+
+All other files are unmodified from upstream.

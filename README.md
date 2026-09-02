@@ -194,3 +194,175 @@ If you want to discuss Metal optimization, Apple Silicon memory hierarchies, or 
 
 *   **X (Twitter):** [Mohammed Hossam (@MohamedHz72007)](https://x.com/MohamedHz72007)
 *   **GitHub:** [mohamedhossammohamed](https://github.com/mohamedhossammohamed)
+
+---
+
+## M3 Ultra Support & Tuning Notes
+
+This section documents a port of the 8B prefill path to the **Apple M3 Ultra** (80-core GPU,
+256 GB unified, macOS 26.5.1, Metal 4). The M4 path is unchanged and still selectable.
+
+### Why the M4 tuning does not transfer
+
+The upstream kernels are tuned for a chip where memory is the binding constraint. On an
+M3 Ultra it is not, and the measurements are not close:
+
+| | measured on this machine |
+|---|---|
+| memory bandwidth ceiling, read-only | **776 GB/s** (95% of 819.2 theoretical) |
+| memory bandwidth ceiling, read+write | **695 GB/s** (85%) |
+| bandwidth the engine actually used | **1.5 GB/s — 0.2% of it** |
+| FP16 / Q4 GEMM reference (MLX, same shapes) | **24.8 TFLOP/s** |
+| upstream causal attention | **2.0 TFLOP/s — 8% of that** |
+| upstream fused MLP | 10.5 TFLOP/s — 42% |
+
+Every kernel was compute- and occupancy-limited, not bandwidth-limited. The specific cause
+is that all GEMM and attention kernels dispatch **32-thread threadgroups** (one SIMD group)
+and give one output column, or one query row, to a single thread. In attention that costs
+~128 registers per thread and 16 KB of threadgroup memory, so at M=2048 the dispatch is
+65,536 threads against ~80,000 thread slots: the machine fills exactly once, with no
+latency hiding.
+
+### What changed
+
+All four stages moved to `simdgroup_matrix` with 128-thread (4 simdgroup) threadgroups:
+
+| new kernel | replaces | note |
+|---|---|---|
+| `flash_attn_sg_causal_d128` | `flash_attn_fp16_causal_d128` | 8 query rows per simdgroup, float O accumulators |
+| `flash_attn_sg_q8_0_causal_d128` | `flash_attn_q8_0_causal_d128` | same body, different tile loader |
+| `sg_gemm_q4_0` | `pipe_gemm_q4_0_32x32` | BN=64, BK=32 (one q4_0 block per step) |
+| `sg_gemm_q4_0_fused_swiglu` | `fused_gate_up_swiglu_q4_0` | 32-row tile; see the fusion note below |
+| `sg_qkv_head_gemm_q4_0` | `pipe_qkv_head_gemm_q4_0` | same body with a `[H, M, D]` scatter epilogue |
+
+The two attention kernels and the four GEMM kernels are each **one templated body**; upstream
+shipped them as separate near-identical copies.
+
+### Results — 8B shapes, M=2048, one layer, GPU timestamps
+
+| stage | upstream on this machine | ported | speedup |
+|---|---|---|---|
+| QKV projections (x3) | 12.418 ms | **9.126** | 1.36x |
+| causal attention (FP16 KV) | 17.24 ms | **1.583** | 10.9x |
+| causal attention (Q8_0 KV) | 17.27 ms | **1.343** | 12.9x |
+| output projection | 4.19 ms | **3.093** | 1.35x |
+| MLP SwiGLU + down | 60.26 ms | **31.646** | 1.90x |
+| **total / layer** | **94.15 ms** | **45.21** | **2.08x** |
+| 32-layer prefill | 3013 ms | **1447 ms** | 2.08x |
+| throughput | 21,752 tok/s | **45,302 tok/s** | |
+
+Against the engine's own baseline kernels the ratio goes from 1.19x to **2.46x**. Against a
+cold MLX reference for the same layer (44.43 ms) the engine moves from 47% to **98.3%**.
+
+### The two findings worth carrying upstream
+
+**1. The gate/up fusion is a net loss on a wide chip.** Simply *unfusing* the existing
+`fused_gate_up_swiglu_q4_0` -- dispatching `pipe_gemm_q4_0_32x32` twice plus the existing
+`swiglu_activation`, no new kernel code -- is worth **1.63x** (45.86 -> 28.15 ms at M=2048).
+The fusion saves one memory pass worth ~0.4 ms here and pays `acc_g[32] + acc_u[32]` = 64
+float accumulator registers per thread, worth ~17 ms.
+
+**2. The Q8_0 KV cache never paid off before.** Upstream, Q8_0 attention cost 17.27 ms
+against FP16's 17.24 ms -- halving the KV cache bought nothing, because the kernel was not
+waiting on bytes. After the port it is 1.354 vs 1.576 ms, so the memory saving is finally
+real and the feature earns its accuracy cost.
+
+### Numerical fidelity improved
+
+The scalar kernels sum partial products in `half` before promoting to `float`; the matrix
+units accumulate in `float` throughout. Every residual got smaller:
+
+| check | upstream | ported |
+|---|---|---|
+| engine gate, FP16 KV, M=512 | 0.00195 | **0.00098** |
+| engine gate, Q8_0 KV, M=1024 | 0.02344 | **0.01562** |
+| engine gate RMSE, M=128 | 0.00011 | **0.00007** |
+| isolated attention vs CPU FP32, M=2048 | 0.02344 (published) | **0.00034** |
+| isolated Q4_0 GEMM vs CPU FP32 | 0.00013-0.00085 | **0.00005-0.00035** |
+
+Cosine similarity 1.000000, zero NaN/Inf, bit-identical across repeated runs, verified at
+sequence lengths 1, 33, 63, 64, 65, 127, 128, 129, 255, 512, 1023, 1024, 2047, 2048, 4096, 8192.
+
+### Building and running
+
+```
+make                      # no Xcode needed; shaders compile at runtime from source
+./bench_8b_engine         # full 8B engine, ported kernels (default)
+./attn_sg_bench           # isolated attention A/B + CPU FP32 reference
+./mlp_bench               # isolated MLP A/B (fused/unfused, scalar/simdgroup) + CPU reference
+```
+
+Fall back to the upstream kernels at runtime, one axis at a time:
+
+```
+M3_SG_ATTN=0 ./bench_8b_engine     # upstream scalar attention
+M3_SG_GEMM=0 ./bench_8b_engine     # upstream scalar GEMMs
+M3_SG_ATTN=0 M3_SG_GEMM=0 ./bench_8b_engine   # fully upstream
+```
+
+### Limitations
+
+* Only the **8B path** (`unified_8b_kernels.metal` + `bench_8b_engine`) is ported. The 1B
+  path and the `micro_bench` / `pipelined_bench` / `flash_attn_bench` / `thermal_stress_test`
+  harnesses still use `unified_kernels.metal` and are untouched.
+* Diagnosis used achieved-throughput-vs-reference plus source analysis, **not** Xcode GPU
+  counters -- the Metal Debugger needs full Xcode, and this machine has Command Line Tools
+  only. Occupancy claims are inferred from register/threadgroup-memory arithmetic and
+  confirmed by the resulting speedups, not read off a counter.
+* The new kernels are **not double-buffered**; the upstream ones were. This began as untested
+  headroom and became a reasoned rejection: double buffering doubles the staged tiles, and
+  every tile measurement here says threadgroup memory is the binding constraint.
+* Attention `BC` was swept: 32 is 1.3% slower for 44% more threadgroup memory, so 16 stays.
+* MLP is still ~5% behind MLX, the largest remaining per-stage gap. QKV is now marginally
+  ahead of MLX (9.126 vs 9.198 ms).
+* Tile parameters were swept under a register-budget constraint (`BM`, `BK`, `BN`, simdgroups
+  per threadgroup); the negative results are recorded in `M3_ULTRA_FINDINGS.md` alongside the
+  wins, because two of them looked like free money on paper.
+
+### Verification pass (corrections to the above)
+
+Re-checked with two probes added in this branch, `occupancy_probe` and `roofline_probe`.
+Full detail in `M3_ULTRA_FINDINGS.md`.
+
+* **The bandwidth ceiling was mislabelled.** 694 GB/s came from an MLX read+write elementwise
+  op. Measured directly: **776 GB/s read-only** (95% of 819.2 theoretical), 695 GB/s read+write
+  -- which reproduces the MLX figure independently, so the number was right for what it
+  measured and wrong as a reference for weight streaming, which is read-dominated. The
+  conclusion (nothing is bandwidth-bound) is unaffected and slightly strengthened.
+* **A register-spill claim is withdrawn.** The 64-row-tile negative result was attributed
+  partly to register spilling. `occupancy_probe` reports `maxTotalThreadsPerThreadgroup = 1024`
+  for all 16 kernels *including that one*, so the compiler applied no register-driven
+  threadgroup limit anywhere. The 32 KB of threadgroup memory -- the full per-threadgroup
+  budget, so one threadgroup per core -- explains it on its own.
+* **No cross-die knee exists.** Coalesced read bandwidth climbs monotonically to 776 GB/s and
+  is flat from 160 to 10,240 threadgroups (40K to 2.6M threads). Metal exposes no die-affinity
+  control either, so there is nothing to tile against in principle.
+* **Access pattern is worth up to 3.09x at matched thread counts** (784.9 vs 254.3 GB/s at 320
+  threadgroups). `sgg_load_b` sits in the scattered regime: weights are `[n][k_block]`, so
+  adjacent thread-pairs read q4_0 blocks `num_kb * 18` bytes apart (2,304 B at K=4096) and each
+  18-byte block is read twice. Repacking to `[k_block][n]` at load time is the top remaining
+  lead; not attempted here because it changes the weight layout.
+* **GPU counters are unreachable on the test machine.** `MTLDevice.counterSets` exposes only
+  `timestamp` -- no `stageutilization`, no `statistic`, and dispatch-boundary sampling is
+  unsupported. Those need Instruments, which needs full Xcode. The occupancy reasoning here is
+  inferred, not counter-verified, which is exactly how the withdrawn claim went wrong.
+
+### Weight layout (added after the verification pass)
+
+The q4_0 weight loader had two defects that are worth flagging because **they are not
+M3-specific** -- the same gather is happening on M4:
+
+1. Weights stored `[n][k_block]` mean adjacent thread-pairs read blocks `num_kb * 18` bytes
+   apart (2,304 B at K=4096). `roofline_probe` measures that pattern as costing up to 3.09x at
+   matched thread counts on this chip.
+2. Every 18-byte block was read *twice*, because low nibbles of `qs[0..15]` are k 0-15 and high
+   nibbles of the same bytes are k 16-31, so both threads of a pair needed all 16 bytes.
+
+Fixed by a one-time repack to `[k_block][N]` at weight load, plus a byte-split so each thread
+takes 8 distinct `qs` bytes and emits both nibble ranges. Adjacent threads now read adjacent
+blocks and nothing is read twice. Worth 2.5% on the fused gate/up, 2.7% on the down projection,
+2.0% on the whole layer. Both layouts stay resident so the baseline kernels are unaffected.
+
+The gain is an order of magnitude below what the raw 3.09x pattern ratio suggests, because the
+weight load overlaps compute rather than serialising against it. Recorded that way in
+`M3_ULTRA_FINDINGS.md` so the microbenchmark is not read as a promise.

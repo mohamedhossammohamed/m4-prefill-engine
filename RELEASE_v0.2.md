@@ -1,10 +1,10 @@
 # v0.2 Release Notes: The Universal Inference Architecture
 
-**Hardware Target:** Apple M4 (10-Core GPU, 16GB Unified Memory, Fanless)
+**Hardware Target:** Apple M4 (10-Core GPU, 16GB Unified Memory, Fanless)  
 **Release Date:** September 2026
 
 ## Overview
-Version 0.2 evolves the `m4-prefill-engine` from a highly optimized prefill kernel into a complete, unified inference architecture. This release introduces universal quantization format support, out-of-core SSD streaming for massive contexts, and strict metrological hardening to ensure all published telemetry reflects physical silicon reality.
+Version 0.2 evolves the `m4-prefill-engine` from a highly optimized prefill kernel into a complete, unified inference architecture. This release introduces universal quantization format support, out-of-core flash streaming for massive contexts, speculative burst decode off internal flash storage, and strict metrological hardening to ensure all published telemetry reflects physical silicon reality.
 
 ## 🚀 Major Additions in v0.2
 
@@ -13,11 +13,11 @@ We engineered a modular routing pipeline that decodes six distinct quantization 
 * **Supported Formats:** Q4_0, MLX 4-Bit (Affine), Q4_K (GGUF Super-Blocks), Variable-Rate Affine (EXL2-style), EXL3 (Hierarchical Codebook), and Ternary 1.58-bit (BitNet).
 * **The Ternary Reality:** Empirical testing reveals that on Apple Silicon, feeding unpacked Ternary weights into the 16.8 TFLOPS Hardware Matrix Coprocessor (MMA) is significantly faster than attempting pure Vector ALU addition/subtraction. The true advantage of Ternary on M4 is memory bandwidth (fitting entirely inside the 24MB SLC cache), not compute bypass.
 
-### 2. 1,000,000-Token Out-of-Core SSD Streaming
-To bypass the 16GB Unified Memory ceiling, v0.2 treats the NVMe SSD as a high-speed RAM extension.
-* **True NVMe DMA:** Utilizes `F_NOCACHE` with strictly 16KB page-aligned (`posix_memalign`) buffers to bypass the macOS Unified Buffer Cache (UBC), achieving 2.0–3.0 GB/s physical read throughput.
-* **Chunked FlashAttention:** Online softmax running statistics ($m_i$, $l_i$) are persisted to global memory between SSD chunks, enabling mathematically exact attention across arbitrarily long contexts.
-* **Capacity:** Successfully verifies speculative tokens against a 1,000,000-token context in ~1.72 seconds end-to-end, consuming ~12.5 GB of physical UMA.
+### 2. 1,000,000-Token Out-of-Core Flash Streaming & Speculative Decode
+To bypass the 16GB Unified Memory ceiling, v0.2 treats internal PCIe flash storage as a high-speed RAM extension.
+* **Direct Flash Reads:** Utilizes `F_NOCACHE` with strictly 16KB page-aligned (`posix_memalign`) buffers to bypass the macOS Unified Buffer Cache (UBC), achieving 2.0–3.0 GB/s physical read throughput from internal PCIe flash storage.
+* **Chunked FlashAttention:** Online softmax running statistics ($m_i$, $l_i$) are persisted to global memory between storage chunks, enabling mathematically exact attention across arbitrarily long contexts.
+* **Speculative Burst Verification:** Amortizes the fixed 4.3 GB streaming cost over $K=64$ candidate tokens simultaneously in registers, delivering ~35.2 verified tok/s at 1M context within 12.5 GB physical UMA (`phys_footprint`).
 
 ### 3. Hardware Matrix Coprocessor (MMA) Integration
 Transitioned core GEMM operations from standard Vector ALUs (`half4 fma`, ~7.4 TFLOPS peak) to Apple's hidden Hardware Matrix Coprocessor (`simdgroup_matrix<half, 8, 8>`, ~16.8 TFLOPS peak), effectively doubling the silicon's compute ceiling.

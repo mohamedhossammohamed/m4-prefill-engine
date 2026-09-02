@@ -11,6 +11,11 @@
 #include <algorithm>
 #include <numeric>
 #include <map>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <fcntl.h>
+#include <unistd.h>
 
 // ============================================================================
 // DATA STRUCTURES & QUANTIZATION TYPES
@@ -24,6 +29,109 @@ struct block_q8_0 {
     __fp16 d;
     int8_t qs[32];
 };
+
+struct EvoTask {
+    std::string id;
+    double score;
+    double median_ms;
+    double stddev_ms;
+    double qkv_ms;
+    double attn_ms;
+    double o_proj_ms;
+    double mlp_ms;
+};
+
+static bool write_evo_result(const std::vector<EvoTask>& tasks,
+                             const std::string& device_name,
+                             uint32_t run_seed) {
+    if (tasks.empty()) {
+        std::cerr << "[-] Cannot publish an empty evo result." << std::endl;
+        return false;
+    }
+
+    double log_sum = 0.0;
+    for (const auto& task : tasks) {
+        if (!(task.score > 0.0) || !std::isfinite(task.score)) {
+            std::cerr << "[-] Invalid latency for " << task.id << ": " << task.score << std::endl;
+            return false;
+        }
+        log_sum += std::log(task.score);
+    }
+    const double score = std::exp(log_sum / static_cast<double>(tasks.size()));
+
+    const char* traces_dir = std::getenv("EVO_TRACES_DIR");
+    const char* experiment_id = std::getenv("EVO_EXPERIMENT_ID");
+    if (traces_dir && *traces_dir) {
+        std::filesystem::create_directories(traces_dir);
+        for (const auto& task : tasks) {
+            const std::filesystem::path trace_path =
+                std::filesystem::path(traces_dir) / ("task_" + task.id + ".json");
+            std::ofstream trace(trace_path);
+            if (!trace) {
+                std::cerr << "[-] Could not write evo trace: " << trace_path << std::endl;
+                return false;
+            }
+            trace << "{\"experiment_id\":\""
+                  << (experiment_id ? experiment_id : "unknown")
+                  << "\",\"task_id\":\"" << task.id
+                  << "\",\"score\":" << std::setprecision(12) << task.score
+                  << ",\"direction\":\"min\",\"status\":\"measured\",\"extras\":{"
+                  << "\"metric\":\"summed_gpu_stage_time_ms\","
+                  << "\"mean_ms\":" << task.score << ','
+                  << "\"median_ms\":" << task.median_ms << ','
+                  << "\"stddev_ms\":" << task.stddev_ms << ','
+                  << "\"qkv_ms\":" << task.qkv_ms << ','
+                  << "\"attention_ms\":" << task.attn_ms << ','
+                  << "\"output_projection_ms\":" << task.o_proj_ms << ','
+                  << "\"mlp_ms\":" << task.mlp_ms << ','
+                  << "\"warmup_iterations\":5,\"measured_iterations\":15,"
+                  << "\"validation\":\"post_gate_pending\","
+                  << "\"seed\":" << run_seed << ','
+                  << "\"device\":\"" << device_name << "\"}}\n";
+        }
+    }
+
+    std::ostringstream payload;
+    payload << "{\"score\":" << std::setprecision(12) << score << ",\"tasks\":{";
+    for (size_t i = 0; i < tasks.size(); ++i) {
+        if (i) payload << ',';
+        payload << '\"' << tasks[i].id << "\":" << std::setprecision(12) << tasks[i].score;
+    }
+    payload << "},\"tasks_meta\":{";
+    for (size_t i = 0; i < tasks.size(); ++i) {
+        if (i) payload << ',';
+        payload << '\"' << tasks[i].id << "\":{\"direction\":\"min\"}";
+    }
+    payload << "}}\n";
+
+    const char* result_path = std::getenv("EVO_RESULT_PATH");
+    if (!result_path || !*result_path) {
+        std::cout << payload.str();
+        return true;
+    }
+
+    const int claim = open(result_path, O_WRONLY | O_CREAT | O_EXCL, 0644);
+    if (claim < 0) {
+        std::cerr << "[-] EVO_RESULT_PATH was already claimed: " << result_path << std::endl;
+        return false;
+    }
+    close(claim);
+
+    const std::string tmp_path = std::string(result_path) + ".tmp";
+    {
+        std::ofstream result(tmp_path);
+        if (!result) {
+            std::cerr << "[-] Could not write temporary evo result: " << tmp_path << std::endl;
+            return false;
+        }
+        result << payload.str();
+    }
+    if (std::rename(tmp_path.c_str(), result_path) != 0) {
+        std::cerr << "[-] Could not publish evo result: " << result_path << std::endl;
+        return false;
+    }
+    return true;
+}
 
 // Deterministic PRNG
 static uint32_t prng_state = 1337;
@@ -244,6 +352,22 @@ struct LayerProfile {
 // ============================================================================
 int main(int argc, const char* argv[]) {
     @autoreleasepool {
+        bool accuracy_only = false;
+        for (int i = 1; i < argc; ++i) {
+            const std::string arg(argv[i]);
+            if (arg == "--accuracy-only") {
+                accuracy_only = true;
+            } else {
+                std::cerr << "[-] Unknown argument: " << arg << std::endl;
+                return 2;
+            }
+        }
+
+        const uint32_t run_seed = static_cast<uint32_t>(
+            std::chrono::high_resolution_clock::now().time_since_epoch().count()) ^
+            static_cast<uint32_t>(getpid());
+        prng_state = run_seed;
+
         std::cout << "==========================================================================================" << std::endl;
         std::cout << "        J.A.R.V.I.S. UNIFIED END-TO-END 8B PREFILL ENGINE BENCHMARK (APPLE M4)           " << std::endl;
         std::cout << "==========================================================================================" << std::endl;
@@ -280,6 +404,8 @@ int main(int argc, const char* argv[]) {
         const uint32_t D = 128;          // Head Dimension
         const uint32_t ATTN_DIM = H * D; // 4096
         const uint32_t N_MLP = 14336;    // Intermediate MLP Dimension
+        const uint32_t q4_layout_column_major = 0;
+        const uint32_t q4_layout_k_major = 1;
         const float attn_scale = 1.0f / std::sqrt((float)D); // 1.0f / sqrt(128) ≈ 0.0883883
         const uint32_t NUM_LAYERS = 32;  // Full 8B model layers
 
@@ -358,13 +484,42 @@ int main(int argc, const char* argv[]) {
         generate_q4_0_weights(h_W_up.data(), mlp_up_blocks);
         generate_q4_0_weights(h_W_down.data(), mlp_down_blocks);
 
+        // The fused Gate/Up kernel loads one output column per SIMD lane. Keep
+        // the original column-major weights for CPU gold and baseline kernels,
+        // and repack only the optimized Gate/Up copies so adjacent lanes read
+        // adjacent Q4 blocks for each K block.
+        const size_t num_mlp_k_blocks = K / 32;
+        std::vector<block_q4_0> h_W_gate_kmajor(mlp_up_blocks);
+        std::vector<block_q4_0> h_W_up_kmajor(mlp_up_blocks);
+        for (size_t kb = 0; kb < num_mlp_k_blocks; ++kb) {
+            for (size_t col = 0; col < N_MLP; ++col) {
+                const size_t original_idx = col * num_mlp_k_blocks + kb;
+                const size_t packed_idx = kb * N_MLP + col;
+                h_W_gate_kmajor[packed_idx] = h_W_gate[original_idx];
+                h_W_up_kmajor[packed_idx] = h_W_up[original_idx];
+            }
+        }
+
+        const size_t num_down_k_blocks = N_MLP / 32;
+        std::vector<block_q4_0> h_W_down_kmajor(mlp_down_blocks);
+        for (size_t kb = 0; kb < num_down_k_blocks; ++kb) {
+            for (size_t col = 0; col < K; ++col) {
+                const size_t original_idx = col * num_down_k_blocks + kb;
+                const size_t packed_idx = kb * K + col;
+                h_W_down_kmajor[packed_idx] = h_W_down[original_idx];
+            }
+        }
+
         id<MTLBuffer> d_W_q    = [device newBufferWithBytes:h_W_q.data() length:qkv_blocks * sizeof(block_q4_0) options:MTLResourceStorageModeShared];
         id<MTLBuffer> d_W_k    = [device newBufferWithBytes:h_W_k.data() length:qkv_blocks * sizeof(block_q4_0) options:MTLResourceStorageModeShared];
         id<MTLBuffer> d_W_v    = [device newBufferWithBytes:h_W_v.data() length:qkv_blocks * sizeof(block_q4_0) options:MTLResourceStorageModeShared];
         id<MTLBuffer> d_W_o    = [device newBufferWithBytes:h_W_o.data() length:o_blocks * sizeof(block_q4_0) options:MTLResourceStorageModeShared];
         id<MTLBuffer> d_W_gate = [device newBufferWithBytes:h_W_gate.data() length:mlp_up_blocks * sizeof(block_q4_0) options:MTLResourceStorageModeShared];
         id<MTLBuffer> d_W_up   = [device newBufferWithBytes:h_W_up.data() length:mlp_up_blocks * sizeof(block_q4_0) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> d_W_gate_kmajor = [device newBufferWithBytes:h_W_gate_kmajor.data() length:mlp_up_blocks * sizeof(block_q4_0) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> d_W_up_kmajor   = [device newBufferWithBytes:h_W_up_kmajor.data() length:mlp_up_blocks * sizeof(block_q4_0) options:MTLResourceStorageModeShared];
         id<MTLBuffer> d_W_down = [device newBufferWithBytes:h_W_down.data() length:mlp_down_blocks * sizeof(block_q4_0) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> d_W_down_kmajor = [device newBufferWithBytes:h_W_down_kmajor.data() length:mlp_down_blocks * sizeof(block_q4_0) options:MTLResourceStorageModeShared];
 
         // ====================================================================
         // STAGE 1: NUMERICAL ACCURACY VERIFICATION (GPU vs CPU GOLD REFERENCE)
@@ -373,7 +528,9 @@ int main(int argc, const char* argv[]) {
         std::cout << ">>> [STAGE 1] END-TO-END 8B LAYER NUMERICAL VERIFICATION (GPU vs CPU REFERENCE)" << std::endl;
         std::cout << "==========================================================================================" << std::endl;
 
-        const std::vector<uint32_t> verify_lengths = {128, 512, 1024};
+        const std::vector<uint32_t> verify_lengths = accuracy_only
+            ? std::vector<uint32_t>{33, 65, 127, 128, 129, 257, 512, 769, 1023, 1024, 1537, 2047, 2048}
+            : std::vector<uint32_t>{128, 512, 1024};
         for (uint32_t M : verify_lengths) {
             std::cout << "\n--- Verifying 8B Layer at Sequence Length M = " << M << " tokens ---" << std::endl;
 
@@ -456,8 +613,8 @@ int main(int argc, const char* argv[]) {
                 [enc setBytes:&H length:sizeof(uint32_t) atIndex:5];
                 [enc setBytes:&attn_scale length:sizeof(float) atIndex:6];
                 [enc setThreadgroupMemoryLength:16384 atIndex:0];
-                MTLSize grid_fa = MTLSizeMake((M + 31) / 32, H, 1);
-                [enc dispatchThreadgroups:grid_fa threadsPerThreadgroup:tg_size_32];
+                MTLSize grid_fa = MTLSizeMake((M + 63) / 64, H, 1);
+                [enc dispatchThreadgroups:grid_fa threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
 
                 // Stage C: O-Projection [M, ATTN_DIM] -> [M, K]
                 [enc setComputePipelineState:pso_pipe_gemm_32x32];
@@ -467,6 +624,7 @@ int main(int argc, const char* argv[]) {
                 [enc setBytes:&M length:sizeof(uint32_t) atIndex:3];
                 [enc setBytes:&K length:sizeof(uint32_t) atIndex:4];
                 [enc setBytes:&ATTN_DIM length:sizeof(uint32_t) atIndex:5];
+                [enc setBytes:&q4_layout_column_major length:sizeof(uint32_t) atIndex:6];
                 [enc setThreadgroupMemoryLength:4096 atIndex:0];
                 MTLSize grid_o = MTLSizeMake((K + 31) / 32, (M + 31) / 32, 1);
                 [enc dispatchThreadgroups:grid_o threadsPerThreadgroup:tg_size_32];
@@ -483,24 +641,25 @@ int main(int argc, const char* argv[]) {
                 // Stage D: Fused Gate+Up GEMM with In-Kernel SwiGLU Epilogue
                 [enc setComputePipelineState:pso_fused_gate_up];
                 [enc setBuffer:d_X_mid offset:0 atIndex:0];
-                [enc setBuffer:d_W_gate offset:0 atIndex:1];
-                [enc setBuffer:d_W_up offset:0 atIndex:2];
+                [enc setBuffer:d_W_gate_kmajor offset:0 atIndex:1];
+                [enc setBuffer:d_W_up_kmajor offset:0 atIndex:2];
                 [enc setBuffer:d_S_mlp offset:0 atIndex:3];
                 [enc setBytes:&M length:sizeof(uint32_t) atIndex:4];
                 [enc setBytes:&N_MLP length:sizeof(uint32_t) atIndex:5];
                 [enc setBytes:&K length:sizeof(uint32_t) atIndex:6];
-                [enc setThreadgroupMemoryLength:4096 atIndex:0];
-                MTLSize grid_mlp_up = MTLSizeMake((N_MLP + 31) / 32, (M + 31) / 32, 1);
-                [enc dispatchThreadgroups:grid_mlp_up threadsPerThreadgroup:tg_size_32];
+                [enc setThreadgroupMemoryLength:10496 atIndex:0];
+                MTLSize grid_mlp_up = MTLSizeMake((N_MLP + 31) / 32, (M + 63) / 64, 1);
+                [enc dispatchThreadgroups:grid_mlp_up threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
 
                 // Stage E: Down-Projection [M, N_MLP] -> [M, K]
                 [enc setComputePipelineState:pso_pipe_gemm_32x32];
                 [enc setBuffer:d_S_mlp offset:0 atIndex:0];
-                [enc setBuffer:d_W_down offset:0 atIndex:1];
+                [enc setBuffer:d_W_down_kmajor offset:0 atIndex:1];
                 [enc setBuffer:d_D_mlp offset:0 atIndex:2];
                 [enc setBytes:&M length:sizeof(uint32_t) atIndex:3];
                 [enc setBytes:&K length:sizeof(uint32_t) atIndex:4];
                 [enc setBytes:&N_MLP length:sizeof(uint32_t) atIndex:5];
+                [enc setBytes:&q4_layout_k_major length:sizeof(uint32_t) atIndex:6];
                 [enc setThreadgroupMemoryLength:4096 atIndex:0];
                 MTLSize grid_down = MTLSizeMake((K + 31) / 32, (M + 31) / 32, 1);
                 [enc dispatchThreadgroups:grid_down threadsPerThreadgroup:tg_size_32];
@@ -516,6 +675,12 @@ int main(int argc, const char* argv[]) {
                 [enc endEncoding];
                 [cmd commit];
                 [cmd waitUntilCompleted];
+                if (cmd.status != MTLCommandBufferStatusCompleted) {
+                    std::cerr << "[-] FP16 validation command buffer failed: "
+                              << (cmd.error ? [[cmd.error localizedDescription] UTF8String] : "unknown Metal error")
+                              << std::endl;
+                    exit(1);
+                }
 
                 memcpy(h_X_out_gpu_opt.data(), [d_X_out contents], in_elements * sizeof(__fp16));
             }
@@ -579,8 +744,8 @@ int main(int argc, const char* argv[]) {
                 [enc setBytes:&H length:sizeof(uint32_t) atIndex:5];
                 [enc setBytes:&attn_scale length:sizeof(float) atIndex:6];
                 [enc setThreadgroupMemoryLength:16384 atIndex:0];
-                MTLSize grid_fa_q8 = MTLSizeMake((M + 31) / 32, H, 1);
-                [enc dispatchThreadgroups:grid_fa_q8 threadsPerThreadgroup:tg_size_32];
+                MTLSize grid_fa_q8 = MTLSizeMake((M + 63) / 64, H, 1);
+                [enc dispatchThreadgroups:grid_fa_q8 threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
 
                 // O-Projection & Residual
                 [enc setComputePipelineState:pso_pipe_gemm_32x32];
@@ -590,6 +755,7 @@ int main(int argc, const char* argv[]) {
                 [enc setBytes:&M length:sizeof(uint32_t) atIndex:3];
                 [enc setBytes:&K length:sizeof(uint32_t) atIndex:4];
                 [enc setBytes:&ATTN_DIM length:sizeof(uint32_t) atIndex:5];
+                [enc setBytes:&q4_layout_column_major length:sizeof(uint32_t) atIndex:6];
                 [enc setThreadgroupMemoryLength:4096 atIndex:0];
                 MTLSize grid_o = MTLSizeMake((K + 31) / 32, (M + 31) / 32, 1);
                 [enc dispatchThreadgroups:grid_o threadsPerThreadgroup:tg_size_32];
@@ -605,23 +771,24 @@ int main(int argc, const char* argv[]) {
                 // MLP Gate/Up + SwiGLU + Down + Residual
                 [enc setComputePipelineState:pso_fused_gate_up];
                 [enc setBuffer:d_X_mid offset:0 atIndex:0];
-                [enc setBuffer:d_W_gate offset:0 atIndex:1];
-                [enc setBuffer:d_W_up offset:0 atIndex:2];
+                [enc setBuffer:d_W_gate_kmajor offset:0 atIndex:1];
+                [enc setBuffer:d_W_up_kmajor offset:0 atIndex:2];
                 [enc setBuffer:d_S_mlp offset:0 atIndex:3];
                 [enc setBytes:&M length:sizeof(uint32_t) atIndex:4];
                 [enc setBytes:&N_MLP length:sizeof(uint32_t) atIndex:5];
                 [enc setBytes:&K length:sizeof(uint32_t) atIndex:6];
-                [enc setThreadgroupMemoryLength:4096 atIndex:0];
-                MTLSize grid_mlp_up = MTLSizeMake((N_MLP + 31) / 32, (M + 31) / 32, 1);
-                [enc dispatchThreadgroups:grid_mlp_up threadsPerThreadgroup:tg_size_32];
+                [enc setThreadgroupMemoryLength:10496 atIndex:0];
+                MTLSize grid_mlp_up = MTLSizeMake((N_MLP + 31) / 32, (M + 63) / 64, 1);
+                [enc dispatchThreadgroups:grid_mlp_up threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
 
                 [enc setComputePipelineState:pso_pipe_gemm_32x32];
                 [enc setBuffer:d_S_mlp offset:0 atIndex:0];
-                [enc setBuffer:d_W_down offset:0 atIndex:1];
+                [enc setBuffer:d_W_down_kmajor offset:0 atIndex:1];
                 [enc setBuffer:d_D_mlp offset:0 atIndex:2];
                 [enc setBytes:&M length:sizeof(uint32_t) atIndex:3];
                 [enc setBytes:&K length:sizeof(uint32_t) atIndex:4];
                 [enc setBytes:&N_MLP length:sizeof(uint32_t) atIndex:5];
+                [enc setBytes:&q4_layout_k_major length:sizeof(uint32_t) atIndex:6];
                 [enc setThreadgroupMemoryLength:4096 atIndex:0];
                 MTLSize grid_down = MTLSizeMake((K + 31) / 32, (M + 31) / 32, 1);
                 [enc dispatchThreadgroups:grid_down threadsPerThreadgroup:tg_size_32];
@@ -636,6 +803,12 @@ int main(int argc, const char* argv[]) {
                 [enc endEncoding];
                 [cmd commit];
                 [cmd waitUntilCompleted];
+                if (cmd.status != MTLCommandBufferStatusCompleted) {
+                    std::cerr << "[-] Q8 validation command buffer failed: "
+                              << (cmd.error ? [[cmd.error localizedDescription] UTF8String] : "unknown Metal error")
+                              << std::endl;
+                    exit(1);
+                }
 
                 memcpy(h_X_out_gpu_q8.data(), [d_X_out contents], in_elements * sizeof(__fp16));
             }
@@ -697,7 +870,10 @@ int main(int argc, const char* argv[]) {
                           << " | AvgDiff: " << avg_diff
                           << " | RMSE: " << rmse
                           << " | Threshold: <= 0.05" << std::endl;
-                assert(pass && "Numerical assertion failed!");
+                if (!pass) {
+                    std::cerr << "[-] Numerical accuracy threshold exceeded for " << name << std::endl;
+                    exit(1);
+                }
             };
 
             eval_diff(h_X_out_gpu_opt, "Unified 8B Engine (FP16 KV)");
@@ -705,6 +881,10 @@ int main(int argc, const char* argv[]) {
         }
 
         std::cout << "\n[✓] 100% NUMERICAL ACCURACY CONFIRMED AT 8B SCALE ACROSS ALL SUITES (MaxDiff <= 0.05)" << std::endl;
+
+        if (accuracy_only) {
+            return 0;
+        }
 
         // ====================================================================
         // STAGE 2: DETAILED BENCHMARKING & BREAKDOWN ACROSS ALL SEQUENCE LENGTHS
@@ -728,6 +908,18 @@ int main(int argc, const char* argv[]) {
             double full_32l_q8_ms;
             double full_32l_tok_s;
             double dram_bw_gb_s;
+            double fp16_median_ms;
+            double fp16_stddev_ms;
+            double q8_median_ms;
+            double q8_stddev_ms;
+            double fp16_qkv_ms;
+            double fp16_attn_ms;
+            double fp16_o_proj_ms;
+            double fp16_mlp_ms;
+            double q8_qkv_ms;
+            double q8_attn_ms;
+            double q8_o_proj_ms;
+            double q8_mlp_ms;
         };
 
         std::vector<SummaryRow> summary_table;
@@ -785,7 +977,18 @@ int main(int argc, const char* argv[]) {
                     }];
                     [cb commit];
                     [cb waitUntilCompleted];
-                    return (gpuEnd - gpuStart) * 1000.0;
+                    if (cb.status != MTLCommandBufferStatusCompleted) {
+                        std::cerr << "[-] Baseline timing command buffer failed: "
+                                  << (cb.error ? [[cb.error localizedDescription] UTF8String] : "unknown Metal error")
+                                  << std::endl;
+                        exit(1);
+                    }
+                    const double elapsed_ms = (gpuEnd - gpuStart) * 1000.0;
+                    if (!(elapsed_ms > 0.0) || !std::isfinite(elapsed_ms)) {
+                        std::cerr << "[-] Invalid baseline GPU stage time: " << elapsed_ms << " ms" << std::endl;
+                        exit(1);
+                    }
+                    return elapsed_ms;
                 };
 
                 // Component A: QKV Projections (llama.cpp GEMM)
@@ -979,7 +1182,18 @@ int main(int argc, const char* argv[]) {
                     }];
                     [cb commit];
                     [cb waitUntilCompleted];
-                    return (gpuEnd - gpuStart) * 1000.0;
+                    if (cb.status != MTLCommandBufferStatusCompleted) {
+                        std::cerr << "[-] Unified timing command buffer failed: "
+                                  << (cb.error ? [[cb.error localizedDescription] UTF8String] : "unknown Metal error")
+                                  << std::endl;
+                        exit(1);
+                    }
+                    const double elapsed_ms = (gpuEnd - gpuStart) * 1000.0;
+                    if (!(elapsed_ms > 0.0) || !std::isfinite(elapsed_ms)) {
+                        std::cerr << "[-] Invalid unified GPU stage time: " << elapsed_ms << " ms" << std::endl;
+                        exit(1);
+                    }
+                    return elapsed_ms;
                 };
 
                 MTLSize tg_size_32 = MTLSizeMake(32, 1, 1);
@@ -1036,8 +1250,8 @@ int main(int argc, const char* argv[]) {
                         [enc setBytes:&H length:sizeof(uint32_t) atIndex:5];
                         [enc setBytes:&attn_scale length:sizeof(float) atIndex:6];
                         [enc setThreadgroupMemoryLength:16384 atIndex:0];
-                        MTLSize grid_fa = MTLSizeMake((M + 31) / 32, H, 1);
-                        [enc dispatchThreadgroups:grid_fa threadsPerThreadgroup:tg_size_32];
+                        MTLSize grid_fa = MTLSizeMake((M + 63) / 64, H, 1);
+                        [enc dispatchThreadgroups:grid_fa threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
                     } else {
                         [enc setComputePipelineState:pso_flash_attn_q8_0];
                         [enc setBuffer:d_Q offset:0 atIndex:0];
@@ -1048,8 +1262,8 @@ int main(int argc, const char* argv[]) {
                         [enc setBytes:&H length:sizeof(uint32_t) atIndex:5];
                         [enc setBytes:&attn_scale length:sizeof(float) atIndex:6];
                         [enc setThreadgroupMemoryLength:16384 atIndex:0];
-                        MTLSize grid_fa_q8 = MTLSizeMake((M + 31) / 32, H, 1);
-                        [enc dispatchThreadgroups:grid_fa_q8 threadsPerThreadgroup:tg_size_32];
+                        MTLSize grid_fa_q8 = MTLSizeMake((M + 63) / 64, H, 1);
+                        [enc dispatchThreadgroups:grid_fa_q8 threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
                     }
                 });
 
@@ -1062,6 +1276,7 @@ int main(int argc, const char* argv[]) {
                     [enc setBytes:&M length:sizeof(uint32_t) atIndex:3];
                     [enc setBytes:&K length:sizeof(uint32_t) atIndex:4];
                     [enc setBytes:&ATTN_DIM length:sizeof(uint32_t) atIndex:5];
+                    [enc setBytes:&q4_layout_column_major length:sizeof(uint32_t) atIndex:6];
                     [enc setThreadgroupMemoryLength:4096 atIndex:0];
                     MTLSize grid_o = MTLSizeMake((K + 31) / 32, (M + 31) / 32, 1);
                     [enc dispatchThreadgroups:grid_o threadsPerThreadgroup:tg_size_32];
@@ -1079,23 +1294,24 @@ int main(int argc, const char* argv[]) {
                 double t_mlp = time_encoder(^(id<MTLComputeCommandEncoder> enc) {
                     [enc setComputePipelineState:pso_fused_gate_up];
                     [enc setBuffer:d_X_mid offset:0 atIndex:0];
-                    [enc setBuffer:d_W_gate offset:0 atIndex:1];
-                    [enc setBuffer:d_W_up offset:0 atIndex:2];
+                    [enc setBuffer:d_W_gate_kmajor offset:0 atIndex:1];
+                    [enc setBuffer:d_W_up_kmajor offset:0 atIndex:2];
                     [enc setBuffer:d_S_mlp offset:0 atIndex:3];
                     [enc setBytes:&M length:sizeof(uint32_t) atIndex:4];
                     [enc setBytes:&N_MLP length:sizeof(uint32_t) atIndex:5];
                     [enc setBytes:&K length:sizeof(uint32_t) atIndex:6];
-                    [enc setThreadgroupMemoryLength:4096 atIndex:0];
-                    MTLSize grid_mlp_up = MTLSizeMake((N_MLP + 31) / 32, (M + 31) / 32, 1);
-                    [enc dispatchThreadgroups:grid_mlp_up threadsPerThreadgroup:tg_size_32];
+                    [enc setThreadgroupMemoryLength:10496 atIndex:0];
+                    MTLSize grid_mlp_up = MTLSizeMake((N_MLP + 31) / 32, (M + 63) / 64, 1);
+                    [enc dispatchThreadgroups:grid_mlp_up threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
 
                     [enc setComputePipelineState:pso_pipe_gemm_32x32];
                     [enc setBuffer:d_S_mlp offset:0 atIndex:0];
-                    [enc setBuffer:d_W_down offset:0 atIndex:1];
+                    [enc setBuffer:d_W_down_kmajor offset:0 atIndex:1];
                     [enc setBuffer:d_D_mlp offset:0 atIndex:2];
                     [enc setBytes:&M length:sizeof(uint32_t) atIndex:3];
                     [enc setBytes:&K length:sizeof(uint32_t) atIndex:4];
                     [enc setBytes:&N_MLP length:sizeof(uint32_t) atIndex:5];
+                    [enc setBytes:&q4_layout_k_major length:sizeof(uint32_t) atIndex:6];
                     [enc setThreadgroupMemoryLength:4096 atIndex:0];
                     MTLSize grid_down = MTLSizeMake((K + 31) / 32, (M + 31) / 32, 1);
                     [enc dispatchThreadgroups:grid_down threadsPerThreadgroup:tg_size_32];
@@ -1130,6 +1346,10 @@ int main(int argc, const char* argv[]) {
 
             // Benchmark runs
             LayerProfile prof_base = {}, prof_opt_fp16 = {}, prof_opt_q8 = {};
+            std::vector<double> fp16_samples;
+            std::vector<double> q8_samples;
+            fp16_samples.reserve(BENCH_ITERS);
+            q8_samples.reserve(BENCH_ITERS);
             for (int it = 0; it < BENCH_ITERS; it++) {
                 LayerProfile p;
                 run_baseline_pass(p);
@@ -1146,12 +1366,15 @@ int main(int argc, const char* argv[]) {
                 prof_opt_fp16.mlp_ms    += p.mlp_ms;
                 prof_opt_fp16.total_ms  += p.total_ms;
 
+                fp16_samples.push_back(p.total_ms);
+
                 run_unified_pass(true, p);
                 prof_opt_q8.qkv_ms    += p.qkv_ms;
                 prof_opt_q8.attn_ms   += p.attn_ms;
                 prof_opt_q8.o_proj_ms += p.o_proj_ms;
                 prof_opt_q8.mlp_ms    += p.mlp_ms;
                 prof_opt_q8.total_ms  += p.total_ms;
+                q8_samples.push_back(p.total_ms);
             }
 
             auto avg_prof = [&](LayerProfile& p) {
@@ -1169,6 +1392,20 @@ int main(int argc, const char* argv[]) {
             avg_prof(prof_base);
             avg_prof(prof_opt_fp16);
             avg_prof(prof_opt_q8);
+
+            auto distribution = [](std::vector<double> samples, double mean) {
+                std::sort(samples.begin(), samples.end());
+                const double median = samples[samples.size() / 2];
+                double variance = 0.0;
+                for (double sample : samples) {
+                    const double delta = sample - mean;
+                    variance += delta * delta;
+                }
+                variance /= static_cast<double>(samples.size());
+                return std::pair<double, double>{median, std::sqrt(variance)};
+            };
+            const auto fp16_distribution = distribution(fp16_samples, prof_opt_fp16.total_ms);
+            const auto q8_distribution = distribution(q8_samples, prof_opt_q8.total_ms);
 
             // Print Detailed Breakdown
             std::cout << std::left << std::setw(28) << "Pipeline Stage"
@@ -1218,7 +1455,19 @@ int main(int argc, const char* argv[]) {
                 prof_opt_fp16.full_model_32l_ms,
                 prof_opt_q8.full_model_32l_ms,
                 prof_opt_fp16.full_model_throughput_tok_s,
-                prof_opt_fp16.dram_bandwidth_gb_s
+                prof_opt_fp16.dram_bandwidth_gb_s,
+                fp16_distribution.first,
+                fp16_distribution.second,
+                q8_distribution.first,
+                q8_distribution.second,
+                prof_opt_fp16.qkv_ms,
+                prof_opt_fp16.attn_ms,
+                prof_opt_fp16.o_proj_ms,
+                prof_opt_fp16.mlp_ms,
+                prof_opt_q8.qkv_ms,
+                prof_opt_q8.attn_ms,
+                prof_opt_q8.o_proj_ms,
+                prof_opt_q8.mlp_ms
             });
         }
 
@@ -1257,6 +1506,23 @@ int main(int argc, const char* argv[]) {
         std::cout << "=================================================================================================================" << std::endl;
         std::cout << " [✓] ALL 8B TRANSFORMER SCALE OBJECTIVES AND BENCHMARKS COMPLETED SUCCESSFULLY." << std::endl;
         std::cout << "=================================================================================================================" << std::endl;
+
+        std::vector<EvoTask> evo_tasks;
+        evo_tasks.reserve(summary_table.size() * 2);
+        for (const auto& row : summary_table) {
+            const std::string prefix = "m" + std::to_string(row.M);
+            evo_tasks.push_back({prefix + "_fp16", row.unified_fp16_ms,
+                                 row.fp16_median_ms, row.fp16_stddev_ms,
+                                 row.fp16_qkv_ms, row.fp16_attn_ms,
+                                 row.fp16_o_proj_ms, row.fp16_mlp_ms});
+            evo_tasks.push_back({prefix + "_q8", row.unified_q8_ms,
+                                 row.q8_median_ms, row.q8_stddev_ms,
+                                 row.q8_qkv_ms, row.q8_attn_ms,
+                                 row.q8_o_proj_ms, row.q8_mlp_ms});
+        }
+        if (!write_evo_result(evo_tasks, [[device name] UTF8String], run_seed)) {
+            return 1;
+        }
     }
     return 0;
 }

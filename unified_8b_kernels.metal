@@ -202,6 +202,7 @@ kernel void pipe_gemm_q4_0_32x32(
     constant uint&             M [[buffer(3)]],
     constant uint&             N [[buffer(4)]],
     constant uint&             K [[buffer(5)]],
+    constant uint& weights_k_major [[buffer(6)]],
     threadgroup half*          shmem [[threadgroup(0)]], // [2][32][32] = 4KB
     uint2 tg_id   [[threadgroup_position_in_grid]],
     uint  simd_lane_id [[thread_index_in_simdgroup]])
@@ -242,7 +243,7 @@ kernel void pipe_gemm_q4_0_32x32(
     load_A(0, 0);
     block_q4_0 q_curr;
     if (valid_col) {
-        q_curr = B[col_idx * num_k_blocks + 0];
+        q_curr = B[weights_k_major ? col_idx : col_idx * num_k_blocks];
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -256,7 +257,8 @@ kernel void pipe_gemm_q4_0_32x32(
         if (next_kb < num_k_blocks) {
             load_A(nxt_buf, next_kb);
             if (valid_col) {
-                q_next = B[col_idx * num_k_blocks + next_kb];
+            q_next = B[weights_k_major ? next_kb * N + col_idx
+                                       : col_idx * num_k_blocks + next_kb];
             }
         }
 
@@ -472,11 +474,12 @@ kernel void fused_gate_up_swiglu_q4_0(
     constant uint&             M      [[buffer(4)]],
     constant uint&             N_mlp  [[buffer(5)]],
     constant uint&             K      [[buffer(6)]],
-    threadgroup half*          shmem  [[threadgroup(0)]], // [2][32][32] = 4KB
+    threadgroup half*          shmem  [[threadgroup(0)]], // [2][64][32] + staged Gate/Up Q4 blocks
     uint2 tg_id   [[threadgroup_position_in_grid]],
-    uint  simd_lane_id [[thread_index_in_simdgroup]])
+    uint  simd_lane_id [[thread_index_in_simdgroup]],
+    uint  simd_group_id [[simdgroup_index_in_threadgroup]])
 {
-    uint tg_row_start = tg_id.y * 32;
+    uint tg_row_start = tg_id.y * 64;
     uint tg_col_start = tg_id.x * 32;
 
     if (tg_row_start >= M || tg_col_start >= N_mlp) return;
@@ -485,7 +488,10 @@ kernel void fused_gate_up_swiglu_q4_0(
     bool valid_col = (col_idx < N_mlp);
     uint num_k_blocks = K / 32;
 
-    threadgroup half (*sh_A)[32][32] = (threadgroup half (*)[32][32])shmem;
+    threadgroup half (*sh_A)[64][32] = (threadgroup half (*)[64][32])shmem;
+    threadgroup block_q4_0 (*sh_B_gate)[32] =
+        (threadgroup block_q4_0 (*)[32])(&sh_A[2][0][0]);
+    threadgroup block_q4_0 (*sh_B_up)[32] = sh_B_gate + 2;
 
     float acc_g[32];
     float acc_u[32];
@@ -501,21 +507,21 @@ kernel void fused_gate_up_swiglu_q4_0(
             uint idx = simd_lane_id * 4 + i;
             uint r = idx / 4;
             uint c = (idx % 4) * 8;
-            uint global_r = tg_row_start + r;
+            uint tile_r = simd_group_id * 32 + r;
+            uint global_r = tg_row_start + tile_r;
             uint global_c = kb * 32 + c;
             float4 val = float4(0.0f);
             if (global_r < M && global_c < K) {
                 val = *reinterpret_cast<device const float4*>(&A[global_r * K + global_c]);
             }
-            *reinterpret_cast<threadgroup float4*>(&sh_A[buf_idx][r][c]) = val;
+            *reinterpret_cast<threadgroup float4*>(&sh_A[buf_idx][tile_r][c]) = val;
         }
     };
 
     load_A(0, 0);
-    block_q4_0 qg_curr, qu_curr;
-    if (valid_col) {
-        qg_curr = B_gate[col_idx * num_k_blocks + 0];
-        qu_curr = B_up[col_idx * num_k_blocks + 0];
+    if (simd_group_id == 0 && valid_col) {
+            sh_B_gate[0][simd_lane_id] = B_gate[col_idx];
+            sh_B_up[0][simd_lane_id] = B_up[col_idx];
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -524,13 +530,20 @@ kernel void fused_gate_up_swiglu_q4_0(
     for (uint kb = 0; kb < num_k_blocks; kb++) {
         uint nxt_buf = cur_buf ^ 1;
         uint next_kb = kb + 1;
-        block_q4_0 qg_next, qu_next;
+        block_q4_0 qg_curr, qu_curr;
+
+        if (valid_col) {
+            qg_curr = sh_B_gate[cur_buf][simd_lane_id];
+            qu_curr = sh_B_up[cur_buf][simd_lane_id];
+        }
 
         if (next_kb < num_k_blocks) {
             load_A(nxt_buf, next_kb);
-            if (valid_col) {
-                qg_next = B_gate[col_idx * num_k_blocks + next_kb];
-                qu_next = B_up[col_idx * num_k_blocks + next_kb];
+            if (simd_group_id == 0 && valid_col) {
+                sh_B_gate[nxt_buf][simd_lane_id] =
+                B_gate[next_kb * N_mlp + col_idx];
+            sh_B_up[nxt_buf][simd_lane_id] =
+                B_up[next_kb * N_mlp + col_idx];
             }
         }
 
@@ -575,14 +588,22 @@ kernel void fused_gate_up_swiglu_q4_0(
 
             #pragma unroll
             for (int r = 0; r < 32; r++) {
-                half4 a0 = *reinterpret_cast<threadgroup const half4*>(&sh_A[cur_buf][r][0]);
-                half4 a1 = *reinterpret_cast<threadgroup const half4*>(&sh_A[cur_buf][r][4]);
-                half4 a2 = *reinterpret_cast<threadgroup const half4*>(&sh_A[cur_buf][r][8]);
-                half4 a3 = *reinterpret_cast<threadgroup const half4*>(&sh_A[cur_buf][r][12]);
-                half4 a4 = *reinterpret_cast<threadgroup const half4*>(&sh_A[cur_buf][r][16]);
-                half4 a5 = *reinterpret_cast<threadgroup const half4*>(&sh_A[cur_buf][r][20]);
-                half4 a6 = *reinterpret_cast<threadgroup const half4*>(&sh_A[cur_buf][r][24]);
-                half4 a7 = *reinterpret_cast<threadgroup const half4*>(&sh_A[cur_buf][r][28]);
+                // Full tiles stay on the original unrolled path. In the final
+                // partial tile, skip dot products for rows that will not be stored.
+                uint simd_row_start = tg_row_start + simd_group_id * 32;
+                if (simd_row_start + 32 > M && simd_row_start + (uint)r >= M) {
+                    continue;
+                }
+
+                uint tile_r = simd_group_id * 32 + r;
+                half4 a0 = *reinterpret_cast<threadgroup const half4*>(&sh_A[cur_buf][tile_r][0]);
+                half4 a1 = *reinterpret_cast<threadgroup const half4*>(&sh_A[cur_buf][tile_r][4]);
+                half4 a2 = *reinterpret_cast<threadgroup const half4*>(&sh_A[cur_buf][tile_r][8]);
+                half4 a3 = *reinterpret_cast<threadgroup const half4*>(&sh_A[cur_buf][tile_r][12]);
+                half4 a4 = *reinterpret_cast<threadgroup const half4*>(&sh_A[cur_buf][tile_r][16]);
+                half4 a5 = *reinterpret_cast<threadgroup const half4*>(&sh_A[cur_buf][tile_r][20]);
+                half4 a6 = *reinterpret_cast<threadgroup const half4*>(&sh_A[cur_buf][tile_r][24]);
+                half4 a7 = *reinterpret_cast<threadgroup const half4*>(&sh_A[cur_buf][tile_r][28]);
 
                 // Gate dot product
                 half4 pg0 = a0 * g_low[0] + a1 * g_low[1];
@@ -604,8 +625,6 @@ kernel void fused_gate_up_swiglu_q4_0(
 
         if (next_kb < num_k_blocks) {
             threadgroup_barrier(mem_flags::mem_threadgroup);
-            qg_curr = qg_next;
-            qu_curr = qu_next;
             cur_buf = nxt_buf;
         }
     }
@@ -613,7 +632,7 @@ kernel void fused_gate_up_swiglu_q4_0(
     if (valid_col) {
         #pragma unroll
         for (int r = 0; r < 32; r++) {
-            uint global_r = tg_row_start + r;
+            uint global_r = tg_row_start + simd_group_id * 32 + r;
             if (global_r < M) {
                 // SwiGLU Activation: S = SiLU(Gate) * Up
                 float g = acc_g[r];
@@ -724,9 +743,9 @@ kernel void flash_attn_fp16_causal_d128(
     uint2 tg_pos [[threadgroup_position_in_grid]],
     uint tid     [[thread_index_in_threadgroup]])
 {
-    constexpr ushort BR = 32;
+    constexpr ushort BR = 64;
     constexpr ushort BC = 16;
-    constexpr ushort TG_SIZE = 32;
+    constexpr ushort TG_SIZE = 64;
 
     uint b_r = tg_pos.x; // Query tile index
     uint h   = tg_pos.y; // Head index
@@ -866,9 +885,9 @@ kernel void flash_attn_q8_0_causal_d128(
     uint2 tg_pos [[threadgroup_position_in_grid]],
     uint tid     [[thread_index_in_threadgroup]])
 {
-    constexpr ushort BR = 32;
+    constexpr ushort BR = 64;
     constexpr ushort BC = 16;
-    constexpr ushort TG_SIZE = 32;
+    constexpr ushort TG_SIZE = 64;
 
     uint b_r = tg_pos.x;
     uint h   = tg_pos.y;

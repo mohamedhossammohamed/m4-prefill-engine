@@ -67,9 +67,9 @@ The streaming engine above solves prefill. The harder question is decode: every 
 | **64K** | [MEASURED] Speculative Burst ($K=64$) | 162.74 ms | 104.25 ms | 2.5 GB/s | **393 tok/s** | 7.45 GB |
 | **128K** | [MEASURED] Speculative Burst ($K=64$) | 288.99 ms | 231.93 ms | 2.3 GB/s | **221 tok/s** | 11.58 GB |
 | **1M** | [MEASURED] Naive Single-Token Decode | 1.68 s | 0.08 s | 2.6 GB/s | **0.60 tok/s** | 12.51 GB |
-| **1M** | [MEASURED] Speculative Burst ($K=64$) | **1.82 s** | **1.74 s** | **2.59 GB/s** | **35.2 verified tok/s** | **12.51 GB** |
+| **1M** | [MEASURED] Speculative Burst ($K=64$) | **1.82 s** | **1.74 s** | **2.59 GB/s** | **35.2 measured tok/s** | **12.51 GB** |
 
-*Result: Speculative burst verification ($K=64$ candidates verified in a single KV stream) delivers ~35.2 verified tok/s at 1,000,000 tokens — ~60x faster than the naive flash floor (0.60 tok/s) and exceeding the naive in-RAM ceiling (22 tok/s), because the 4.3 GB stream is amortized across 64 candidate tokens.*
+*Result: Speculative burst verification ($K=64$ candidates processed in a single KV stream) delivers ~35.2 measured tok/s at 1,000,000 tokens — ~60x faster than the naive flash floor (0.60 tok/s) and exceeding the naive in-RAM ceiling (22 tok/s), because the 4.3 GB stream is amortized across 64 candidate tokens.*
 
 #### The Architectural Tricks
 1. **Q8_0 KV Cache Compression:** Halves the required storage footprint and read volume from 8.6 GB down to 4.3 GB per pass.

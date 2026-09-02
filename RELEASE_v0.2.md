@@ -17,7 +17,7 @@ We engineered a modular routing pipeline that decodes six distinct quantization 
 To bypass the 16GB Unified Memory ceiling, v0.2 treats internal PCIe flash storage as a high-speed RAM extension.
 * **Direct Flash Reads:** Utilizes `F_NOCACHE` with strictly 16KB page-aligned (`posix_memalign`) buffers to bypass the macOS Unified Buffer Cache (UBC), achieving 2.0–3.0 GB/s physical read throughput from internal PCIe flash storage.
 * **Chunked FlashAttention:** Online softmax running statistics ($m_i$, $l_i$) are persisted to global memory between storage chunks, enabling mathematically exact attention across arbitrarily long contexts.
-* **Speculative Burst Verification:** Amortizes the fixed 4.3 GB streaming cost over $K=64$ candidate tokens simultaneously in registers, delivering ~35.2 verified tok/s at 1M context within 12.5 GB physical UMA (`phys_footprint`).
+* **Speculative Burst Verification:** Amortizes the fixed 4.3 GB streaming cost over $K=64$ candidate tokens simultaneously in registers, delivering ~35.2 measured tok/s at 1M context within 12.5 GB physical UMA (`phys_footprint`).
 
 ### 3. Hardware Matrix Coprocessor (MMA) Integration
 Transitioned core GEMM operations from standard Vector ALUs (`half4 fma`, ~7.4 TFLOPS peak) to Apple's hidden Hardware Matrix Coprocessor (`simdgroup_matrix<half, 8, 8>`, ~16.8 TFLOPS peak), effectively doubling the silicon's compute ceiling.

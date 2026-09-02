@@ -1,5 +1,8 @@
 # Out-of-Core Flash Streaming & Speculative Decode (1M Context)
 
+> [!IMPORTANT]
+> **Release Scope Notice (v0.2.1):** 1,000,000-token out-of-core flash streaming and speculative burst decoding are designated as **experimental research prototypes** and are **deferred from the v0.2.1 release**. The active release scope focuses 100% on ultra-low-latency in-core prefill acceleration ($M \le 2048$ tokens).
+
 This document details the systems architecture, mathematical derivations, memory management protocols, and empirical telemetry of the **1,000,000-Token Out-of-Core Flash Streaming Engine** in `m4-prefill-engine`.
 
 ---

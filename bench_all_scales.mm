@@ -1531,6 +1531,16 @@ int main(int argc, const char* argv[]) {
             double ours_q4_1l_ms  = r.opt_fp16_wall_ms;
             double llama_1l_ms    = r.baseline_wall_ms;
 
+            auto fmt_time = [](double ms) -> std::string {
+                std::ostringstream ss;
+                if (ms >= 1000.0) {
+                    ss << std::fixed << std::setprecision(2) << (ms / 1000.0) << " s";
+                } else {
+                    ss << std::fixed << std::setprecision(2) << ms << " ms";
+                }
+                return ss.str();
+            };
+
             double mlx_full_ms     = mlx_1l_ms * num_layers;
             double ours_mlx_full_ms = ours_mlx_1l_ms * num_layers;
 
@@ -1545,8 +1555,8 @@ int main(int argc, const char* argv[]) {
                       << " | " << std::setw(11) << ours_q4_1l_ms << " ms"
                       << " | " << std::setw(11) << llama_1l_ms << " ms"
                       << " | " << std::setw(11) << std::setprecision(2) << vs_llama << "x"
-                      << " | " << std::setw(12) << ours_mlx_full_ms << " ms"
-                      << " | " << std::setw(14) << mlx_full_ms << " ms\n";
+                      << " | " << std::setw(15) << fmt_time(ours_mlx_full_ms)
+                      << " | " << std::setw(17) << fmt_time(mlx_full_ms) << "\n";
         }
         std::cout << "===================================================================================================================================================\n";
         std::cout << " [✓] 100% NUMERICAL ACCURACY CONFIRMED ACROSS ALL TIERS (MaxDiff <= 0.05, ZERO NaN/Inf)\n";

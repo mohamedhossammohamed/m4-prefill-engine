@@ -17,7 +17,7 @@ Version 0.2.1 ("Beyond MLX Prefill Speeds") packages the architectural optimizat
   * Replaced unaligned scalar byte reads with direct 128-bit vector loads (`uint4`), saturating Apple Silicon's 128-bit Load-Store Unit (LSU) with zero split-load cache penalties.
 * **Threadgroup SRAM Stride-36 Bank Padding:**
   * Padded `sh_A` matrix tiles from stride 32 to stride 36 (`half sh_A[64][36]`), completely eradicating 32-way shared memory bank conflicts across Apple Silicon's 32-bank threadgroup SRAM during Hardware Matrix Coprocessor (`simdgroup_matrix`) outer-product execution.
-  * Solved the power-of-2 bank aliasing bottleneck that degraded saturated sequence lengths ($M=2048$), propelling full-model 1B prefill from 2017.44 ms (MLX) down to **1705.76 ms**.
+  * Solved the power-of-2 bank aliasing bottleneck that degraded saturated sequence lengths ($M=2048$), propelling full-model 1B prefill from 2.02 s (MLX) down to **1.71 s**.
 * **Direct-Head Multi-Head Attention Layout:**
   * Eliminated post-GEMM memory transpositions by directly projecting Q, K, and V into $[H, M, D]$ layout, bypassing round-trip DRAM churn prior to FlashAttention.
 * **Dual-SIMDgroup SwiGLU Cooperative Fusion:**

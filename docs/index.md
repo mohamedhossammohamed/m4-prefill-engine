@@ -100,14 +100,14 @@ Measured using shared wall-clock timing parity (10 warmup, 20 measured iteration
 | Prompt ($M$) | Boundary Type | Apple MLX Metal (MLX 4-bit) | Our Engine (MLX 4-bit) | vs MLX | Our Engine (GGUF Q4_0) | llama.cpp (GGUF Q4_0) | vs llama.cpp |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | **33** | Edge (Unaligned) | 563.52 ms (17.61 ms/L) | **449.58 ms** (14.05 ms/L) | **1.25x faster** | 497.60 ms (15.55 ms/L) | 872.64 ms (27.27 ms/L) | **1.75x faster** |
-| **127** | Edge (Unaligned) | 1261.12 ms (39.41 ms/L) | **1025.54 ms** (32.05 ms/L) | **1.23x faster** | 1159.04 ms (36.22 ms/L) | 2112.96 ms (66.03 ms/L) | **1.82x faster** |
-| **128** | Aligned ($2^7$) | 1314.88 ms (41.09 ms/L) | **1033.85 ms** (32.31 ms/L) | **1.27x faster** | 1192.00 ms (37.25 ms/L) | 2103.04 ms (65.72 ms/L) | **1.76x faster** |
-| **129** | Edge (Unaligned) | 2167.68 ms (67.74 ms/L) | **1505.85 ms** (47.06 ms/L) | **1.44x faster** | 1728.64 ms (54.02 ms/L) | 3029.44 ms (94.67 ms/L) | **1.75x faster** |
-| **512** | Aligned ($2^9$) | 4970.24 ms (155.32 ms/L) | **4211.53 ms** (131.61 ms/L) | **1.18x faster** | 4789.76 ms (149.69 ms/L) | 8416.32 ms (263.01 ms/L) | **1.76x faster** |
-| **1023** | Edge (Unaligned) | 10547.52 ms (329.61 ms/L) | **9326.81 ms** (291.46 ms/L) | **1.13x faster** | 10398.40 ms (324.95 ms/L) | 18543.36 ms (579.48 ms/L) | **1.78x faster** |
-| **1024** | Aligned ($2^{10}$) | 9832.64 ms (307.27 ms/L) | **9114.93 ms** (284.84 ms/L) | **1.08x faster** | 10162.24 ms (317.57 ms/L) | 17995.20 ms (562.35 ms/L) | **1.77x faster** |
-| **2047** | Edge (Unaligned) | 20501.44 ms (640.67 ms/L) | **19442.34 ms** (607.57 ms/L) | **1.05x faster** | 21540.80 ms (673.15 ms/L) | 39232.64 ms (1226.02 ms/L) | **1.82x faster** |
-| **2048** | Aligned ($2^{11}$) | **19602.88 ms** (612.59 ms/L) | 19753.89 ms (617.31 ms/L) | 0.99x (≈ Parity) | 21561.92 ms (673.81 ms/L) | 38776.00 ms (1211.75 ms/L) | **1.80x faster** |
+| **127** | Edge (Unaligned) | 1.26 s (39.41 ms/L) | **1.03 s** (32.05 ms/L) | **1.23x faster** | 1.16 s (36.22 ms/L) | 2.11 s (66.03 ms/L) | **1.82x faster** |
+| **128** | Aligned ($2^7$) | 1.31 s (41.09 ms/L) | **1.03 s** (32.31 ms/L) | **1.27x faster** | 1.19 s (37.25 ms/L) | 2.10 s (65.72 ms/L) | **1.76x faster** |
+| **129** | Edge (Unaligned) | 2.17 s (67.74 ms/L) | **1.51 s** (47.06 ms/L) | **1.44x faster** | 1.73 s (54.02 ms/L) | 3.03 s (94.67 ms/L) | **1.75x faster** |
+| **512** | Aligned ($2^9$) | 4.97 s (155.32 ms/L) | **4.21 s** (131.61 ms/L) | **1.18x faster** | 4.79 s (149.69 ms/L) | 8.42 s (263.01 ms/L) | **1.76x faster** |
+| **1023** | Edge (Unaligned) | 10.55 s (329.61 ms/L) | **9.33 s** (291.46 ms/L) | **1.13x faster** | 10.40 s (324.95 ms/L) | 18.54 s (579.48 ms/L) | **1.78x faster** |
+| **1024** | Aligned ($2^{10}$) | 9.83 s (307.27 ms/L) | **9.11 s** (284.84 ms/L) | **1.08x faster** | 10.16 s (317.57 ms/L) | 18.00 s (562.35 ms/L) | **1.77x faster** |
+| **2047** | Edge (Unaligned) | 20.50 s (640.67 ms/L) | **19.44 s** (607.57 ms/L) | **1.05x faster** | 21.54 s (673.15 ms/L) | 39.23 s (1226.02 ms/L) | **1.82x faster** |
+| **2048** | Aligned ($2^{11}$) | **19.60 s** (612.59 ms/L) | 19.75 s (617.31 ms/L) | 0.99x (≈ Parity) | 21.56 s (673.81 ms/L) | 38.78 s (1211.75 ms/L) | **1.80x faster** |
 
 #### 1B Model Tier (16 Layers, $K=2048, H=32, D=64, N_{\text{mlp}}=5632$)
 
@@ -117,11 +117,11 @@ Measured using shared wall-clock timing parity (10 warmup, 20 measured iteration
 | **127** | Edge (Unaligned) | **103.68 ms** (6.48 ms/L) | 109.71 ms (6.86 ms/L) | 0.95x | 128.00 ms (8.00 ms/L) | 217.28 ms (13.58 ms/L) | **1.70x faster** |
 | **128** | Aligned ($2^7$) | **101.28 ms** (6.33 ms/L) | 121.84 ms (7.62 ms/L) | 0.83x | 135.04 ms (8.44 ms/L) | 226.72 ms (14.17 ms/L) | **1.68x faster** |
 | **129** | Edge (Unaligned) | **131.84 ms** (8.24 ms/L) | 188.03 ms (11.75 ms/L) | 0.70x | 226.88 ms (14.18 ms/L) | 379.84 ms (23.74 ms/L) | **1.67x faster** |
-| **512** | Aligned ($2^9$) | **374.56 ms** (23.41 ms/L) | 476.76 ms (29.80 ms/L) | 0.79x | 570.72 ms (35.67 ms/L) | 1097.12 ms (68.57 ms/L) | **1.92x faster** |
-| **1023** | Edge (Unaligned) | **761.12 ms** (47.57 ms/L) | 1055.93 ms (66.00 ms/L) | 0.72x | 1176.48 ms (73.53 ms/L) | 2444.32 ms (152.77 ms/L) | **2.08x faster** |
-| **1024** | Aligned ($2^{10}$) | **796.48 ms** (49.78 ms/L) | 997.80 ms (62.36 ms/L) | 0.80x | 1113.44 ms (69.59 ms/L) | 2173.12 ms (135.82 ms/L) | **1.95x faster** |
-| **2047** | Edge (Unaligned) | 1954.56 ms (122.16 ms/L) | **1697.53 ms** (106.10 ms/L) | **1.15x faster** | 1870.88 ms (116.93 ms/L) | 4311.84 ms (269.49 ms/L) | **2.30x faster** |
-| **2048** | Aligned ($2^{11}$) | 2017.44 ms (126.09 ms/L) | **1705.76 ms** (106.61 ms/L) | **1.18x faster** | 1867.84 ms (116.74 ms/L) | 4094.56 ms (255.91 ms/L) | **2.19x faster** |
+| **512** | Aligned ($2^9$) | **374.56 ms** (23.41 ms/L) | 476.76 ms (29.80 ms/L) | 0.79x | 570.72 ms (35.67 ms/L) | 1.10 s (68.57 ms/L) | **1.92x faster** |
+| **1023** | Edge (Unaligned) | **761.12 ms** (47.57 ms/L) | 1.06 s (66.00 ms/L) | 0.72x | 1.18 s (73.53 ms/L) | 2.44 s (152.77 ms/L) | **2.08x faster** |
+| **1024** | Aligned ($2^{10}$) | **796.48 ms** (49.78 ms/L) | 997.80 ms (62.36 ms/L) | 0.80x | 1.11 s (69.59 ms/L) | 2.17 s (135.82 ms/L) | **1.95x faster** |
+| **2047** | Edge (Unaligned) | 1.95 s (122.16 ms/L) | **1.70 s** (106.10 ms/L) | **1.15x faster** | 1.87 s (116.93 ms/L) | 4.31 s (269.49 ms/L) | **2.30x faster** |
+| **2048** | Aligned ($2^{11}$) | 2.02 s (126.09 ms/L) | **1.71 s** (106.61 ms/L) | **1.18x faster** | 1.87 s (116.74 ms/L) | 4.09 s (255.91 ms/L) | **2.19x faster** |
 
 ---
 

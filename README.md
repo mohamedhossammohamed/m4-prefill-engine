@@ -145,17 +145,17 @@ shipped them as separate near-identical copies.
 
 | stage | upstream on this machine | ported | speedup |
 |---|---|---|---|
-| QKV projections (x3) | 12.418 ms | **9.293** | 1.34x |
-| causal attention (FP16 KV) | 17.24 ms | **1.573** | 11.0x |
-| causal attention (Q8_0 KV) | 17.27 ms | **1.348** | 12.8x |
-| output projection | 4.19 ms | **3.163** | 1.32x |
-| MLP SwiGLU + down | 60.26 ms | **32.288** | 1.87x |
-| **total / layer** | **94.15 ms** | **46.16** | **2.04x** |
-| 32-layer prefill | 3013 ms | **1477 ms** | 2.04x |
-| throughput | 21,752 tok/s | **44,364 tok/s** | |
+| QKV projections (x3) | 12.418 ms | **9.126** | 1.36x |
+| causal attention (FP16 KV) | 17.24 ms | **1.583** | 10.9x |
+| causal attention (Q8_0 KV) | 17.27 ms | **1.343** | 12.9x |
+| output projection | 4.19 ms | **3.093** | 1.35x |
+| MLP SwiGLU + down | 60.26 ms | **31.646** | 1.90x |
+| **total / layer** | **94.15 ms** | **45.21** | **2.08x** |
+| 32-layer prefill | 3013 ms | **1447 ms** | 2.08x |
+| throughput | 21,752 tok/s | **45,302 tok/s** | |
 
-Against the engine's own baseline kernels the ratio goes from 1.19x to **2.35x**. Against a
-cold MLX reference for the same layer (44.43 ms) the engine moves from 47% to **96.3%**.
+Against the engine's own baseline kernels the ratio goes from 1.19x to **2.46x**. Against a
+cold MLX reference for the same layer (44.43 ms) the engine moves from 47% to **98.3%**.
 
 ### The two findings worth carrying upstream
 
@@ -216,7 +216,8 @@ M3_SG_ATTN=0 M3_SG_GEMM=0 ./bench_8b_engine   # fully upstream
   headroom and became a reasoned rejection: double buffering doubles the staged tiles, and
   every tile measurement here says threadgroup memory is the binding constraint.
 * Attention `BC` was swept: 32 is 1.3% slower for 44% more threadgroup memory, so 16 stays.
-* MLP is still ~7% behind MLX, the largest remaining per-stage gap.
+* MLP is still ~5% behind MLX, the largest remaining per-stage gap. QKV is now marginally
+  ahead of MLX (9.126 vs 9.198 ms).
 * Tile parameters were swept under a register-budget constraint (`BM`, `BK`, `BN`, simdgroups
   per threadgroup); the negative results are recorded in `M3_ULTRA_FINDINGS.md` alongside the
   wins, because two of them looked like free money on paper.
@@ -248,3 +249,23 @@ Full detail in `M3_ULTRA_FINDINGS.md`.
   `timestamp` -- no `stageutilization`, no `statistic`, and dispatch-boundary sampling is
   unsupported. Those need Instruments, which needs full Xcode. The occupancy reasoning here is
   inferred, not counter-verified, which is exactly how the withdrawn claim went wrong.
+
+### Weight layout (added after the verification pass)
+
+The q4_0 weight loader had two defects that are worth flagging because **they are not
+M3-specific** -- the same gather is happening on M4:
+
+1. Weights stored `[n][k_block]` mean adjacent thread-pairs read blocks `num_kb * 18` bytes
+   apart (2,304 B at K=4096). `roofline_probe` measures that pattern as costing up to 3.09x at
+   matched thread counts on this chip.
+2. Every 18-byte block was read *twice*, because low nibbles of `qs[0..15]` are k 0-15 and high
+   nibbles of the same bytes are k 16-31, so both threads of a pair needed all 16 bytes.
+
+Fixed by a one-time repack to `[k_block][N]` at weight load, plus a byte-split so each thread
+takes 8 distinct `qs` bytes and emits both nibble ranges. Adjacent threads now read adjacent
+blocks and nothing is read twice. Worth 2.5% on the fused gate/up, 2.7% on the down projection,
+2.0% on the whole layer. Both layouts stay resident so the baseline kernels are unaffected.
+
+The gain is an order of magnitude below what the raw 3.09x pattern ratio suggests, because the
+weight load overlaps compute rather than serialising against it. Recorded that way in
+`M3_ULTRA_FINDINGS.md` so the microbenchmark is not read as a promise.

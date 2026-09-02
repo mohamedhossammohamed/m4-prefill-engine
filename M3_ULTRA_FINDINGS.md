@@ -664,3 +664,79 @@ parameter.
 All experiments in this pass were reverted; the shipped engine is byte-identical and
 re-verified: 46.152 ms/layer at M=2048, 6 PASS / 0 FAIL, stage times matching the published
 table to within run-to-run noise.
+
+---
+
+# Lever 5 — repacking the q4_0 weights (the access-pattern lead, executed)
+
+The verification pass identified the weight loader as the top remaining lead: `roofline_probe`
+measured the access pattern as worth up to **3.09x at matched thread counts**, and `sgg_load_b`
+sat squarely in the scattered regime. This is that fix.
+
+## The two defects in the original load
+
+Weights are stored `[n][k_block]`. At K=4096 that means `num_kb = 128`, so:
+
+1. **Adjacent thread-pairs read blocks 2,304 bytes apart.** Within one simdgroup, 16 distinct
+   q4_0 blocks are fetched spanning ~37 KB — a gather, not a stream.
+2. **Every 18-byte block is read twice.** Low nibbles of `qs[0..15]` are k 0-15 and high nibbles
+   of the *same* bytes are k 16-31, so both threads of a pair needed all 16 bytes.
+
+## The fix
+
+* **Repack `[n][k_block]` -> `[k_block][N]`** at weight load. Adjacent output columns become
+  adjacent in memory, so adjacent threads read adjacent blocks.
+* **Split by byte, not by nibble range.** Each thread takes 8 distinct `qs` bytes and emits both
+  nibble ranges for them (`dst[j]` and `dst[16+j]`). Nothing is read twice.
+
+Cost is a one-time host repack; in a real engine it happens at weight load. The engine keeps
+*both* layouts resident, because the baseline and `llamacpp_style_mul_mm_q4_0` comparison
+kernels still read the original layout and must stay honest.
+
+## Result
+
+| kernel (M=2048) | scattered | **repacked** | gain |
+|---|---|---|---|
+| fused gate/up, K=4096 N=14336 | 21.424 ms (IQR 0.005) | **20.895 (0.002)** | 2.5% |
+| down projection, K=14336 N=4096 | 10.802 ms (0.009) | **10.513 (0.007)** | 2.7% |
+
+Both well outside the IQR. Full engine at M=2048:
+
+| stage | before repack | **after** | cold MLX |
+|---|---|---|---|
+| QKV projections (x3) | 9.279 | **9.126** | 9.198 |
+| causal attention (Q8_0 KV) | 1.352 | **1.343** | - |
+| output projection | 3.169 | **3.093** | 3.051 |
+| MLP SwiGLU + down | 32.288 | **31.646** | 30.096 |
+| **total / layer** | **46.15** | **45.21** | 44.43 |
+| 32-layer prefill | 1477 ms | **1447 ms** | - |
+| throughput | 44,364 tok/s | **45,302 tok/s** | |
+
+**94.15 -> 45.21 ms/layer, 2.08x over the untuned upstream engine, 2.46x over its own baseline,
+and 98.3% of a cold MLX reference** (was 96.3%). QKV is now marginally *ahead* of MLX (9.126 vs
+9.198) and the output projection is within 1.4%. The MLP is the only stage still meaningfully
+behind, at 5.2%.
+
+The gain (2.5%) is far smaller than the raw access-pattern ratio (3.09x) would suggest, because
+the weight load overlaps with compute rather than serialising against it. The prediction was
+directionally right and quantitatively wrong by an order of magnitude -- worth recording, since
+the same reasoning would over-promise on any other memory-pattern fix here.
+
+## Fidelity
+Identical to the unpacked path at every shape: max-abs 0.00005-0.00011 (gate/up) and
+0.00028-0.00035 (down) against the CPU FP32 reference, cosine 1.000000. Engine gate 6 PASS /
+0 FAIL with MaxDiff unchanged (0.00195 / 0.00098 / 0.00781 FP16 KV, 0.00293 / 0.00244 / 0.01562
+Q8_0 KV).
+
+## Validation
+
+| configuration | layer ms | tok/s | gates |
+|---|---|---|---|
+| ported + packed weights | **45.246** | 45,165 | 6 PASS / 0 FAIL |
+| `M3_SG_ATTN=0` | 61.041 | 33,613 | 6 PASS / 0 FAIL |
+| `M3_SG_GEMM=0` | 78.272 | 26,117 | 6 PASS / 0 FAIL |
+| both `=0` (fully original) | 94.208 | 21,771 | 6 PASS / 0 FAIL |
+
+Sustained: 4 back-to-back runs, 45.236-45.365 ms (0.28% spread), 24 gates, 0 failures, swap
+0.00 M. The fully-original path still reproduces its own baseline, so the repack did not
+disturb it -- the original weight buffers stay live and bound to the original kernels.

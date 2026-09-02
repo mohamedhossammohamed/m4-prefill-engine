@@ -64,6 +64,15 @@ static void cpu_ref(const __fp16* A, const block_q4_0* Wg, const block_q4_0* Wu,
         }
     });
 }
+// Repack q4_0 weights from [N][K/32] to [K/32][N] so adjacent output columns are
+// adjacent in memory. One-time cost; in a real engine it happens at weight load.
+static void repack(const block_q4_0* src, block_q4_0* dst, uint N, uint K) {
+    uint nkb = K / 32;
+    for (uint n = 0; n < N; n++)
+        for (uint kb = 0; kb < nkb; kb++)
+            dst[(size_t)kb * N + n] = src[(size_t)n * nkb + kb];
+}
+
 struct Stat { double med, iqr; };
 static Stat stats(std::vector<double> v) {
     std::sort(v.begin(), v.end()); size_t n = v.size();
@@ -89,6 +98,12 @@ int main(int argc, const char** argv) { @autoreleasepool {
     id<MTLComputePipelineState> P_fused64 = pso(@"sg_gemm_q4_0_fused_swiglu_bm64");
     id<MTLComputePipelineState> P_gemm_k64  = pso(@"sg_gemm_q4_0_bk64");
     id<MTLComputePipelineState> P_fused_k64 = pso(@"sg_gemm_q4_0_fused_swiglu_bk64");
+    id<MTLComputePipelineState> P_gemm_w   = pso(@"sg_gemm_q4_0_wide");
+    id<MTLComputePipelineState> P_gemm_w128= pso(@"sg_gemm_q4_0_wide128");
+    id<MTLComputePipelineState> P_gemm_pk  = pso(@"sg_gemm_q4_0_packed");
+    id<MTLComputePipelineState> P_fused_pk = pso(@"sg_gemm_q4_0_fused_swiglu_wide_packed");
+    id<MTLBuffer> gWgp = nil, gWup = nil;
+    id<MTLComputePipelineState> P_fused_w  = pso(@"sg_gemm_q4_0_fused_swiglu_wide");
     id<MTLCommandQueue> q = [dev newCommandQueue];
     printf("device: %s\n", [[dev name] UTF8String]);
 
@@ -138,6 +153,41 @@ int main(int argc, const char** argv) { @autoreleasepool {
             [c dispatchThreadgroups:MTLSizeMake((N+63)/64,(M+31)/32,1) threadsPerThreadgroup:MTLSizeMake(128,1,1)];
         } else if (cfg == 3) {                // unfused simdgroup
             gemm_g(Wg, T0); gemm_g(Wu, T1); swig();
+        } else if (cfg == 12) {               // fused, repacked weights
+            [c setComputePipelineState:P_fused_pk];
+            [c setBuffer:A offset:0 atIndex:0]; [c setBuffer:gWgp offset:0 atIndex:1];
+            [c setBuffer:gWup offset:0 atIndex:2]; [c setBuffer:Out offset:0 atIndex:3];
+            [c setBytes:&M length:4 atIndex:4]; [c setBytes:&N length:4 atIndex:5]; [c setBytes:&K length:4 atIndex:6];
+            [c setThreadgroupMemoryLength:12288 atIndex:0];
+            [c dispatchThreadgroups:MTLSizeMake((N+63)/64,(M+63)/64,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];
+        } else if (cfg == 13) {               // plain, repacked weights
+            [c setComputePipelineState:P_gemm_pk];
+            [c setBuffer:A offset:0 atIndex:0]; [c setBuffer:gWgp offset:0 atIndex:1];
+            [c setBuffer:Out offset:0 atIndex:2];
+            [c setBytes:&M length:4 atIndex:3]; [c setBytes:&N length:4 atIndex:4]; [c setBytes:&K length:4 atIndex:5];
+            [c setThreadgroupMemoryLength:8192 atIndex:0];
+            [c dispatchThreadgroups:MTLSizeMake((N+63)/64,(M+63)/64,1) threadsPerThreadgroup:MTLSizeMake(128,1,1)];
+        } else if (cfg == 11) {               // plain simdgroup, 8 simdgroups, BN=128
+            [c setComputePipelineState:P_gemm_w128];
+            [c setBuffer:A offset:0 atIndex:0]; [c setBuffer:Wg offset:0 atIndex:1];
+            [c setBuffer:Out offset:0 atIndex:2];
+            [c setBytes:&M length:4 atIndex:3]; [c setBytes:&N length:4 atIndex:4]; [c setBytes:&K length:4 atIndex:5];
+            [c setThreadgroupMemoryLength:12288 atIndex:0];
+            [c dispatchThreadgroups:MTLSizeMake((N+127)/128,(M+63)/64,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];
+        } else if (cfg == 9) {                // fused simdgroup, 8 simdgroups, BM=64
+            [c setComputePipelineState:P_fused_w];
+            [c setBuffer:A offset:0 atIndex:0]; [c setBuffer:Wg offset:0 atIndex:1];
+            [c setBuffer:Wu offset:0 atIndex:2]; [c setBuffer:Out offset:0 atIndex:3];
+            [c setBytes:&M length:4 atIndex:4]; [c setBytes:&N length:4 atIndex:5]; [c setBytes:&K length:4 atIndex:6];
+            [c setThreadgroupMemoryLength:12288 atIndex:0];
+            [c dispatchThreadgroups:MTLSizeMake((N+63)/64,(M+63)/64,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];
+        } else if (cfg == 10) {               // plain simdgroup, 8 simdgroups, BM=128
+            [c setComputePipelineState:P_gemm_w];
+            [c setBuffer:A offset:0 atIndex:0]; [c setBuffer:Wg offset:0 atIndex:1];
+            [c setBuffer:Out offset:0 atIndex:2];
+            [c setBytes:&M length:4 atIndex:3]; [c setBytes:&N length:4 atIndex:4]; [c setBytes:&K length:4 atIndex:5];
+            [c setThreadgroupMemoryLength:12288 atIndex:0];
+            [c dispatchThreadgroups:MTLSizeMake((N+63)/64,(M+127)/128,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];
         } else if (cfg == 7) {                // fused simdgroup, BK=64
             [c setComputePipelineState:P_fused_k64];
             [c setBuffer:A offset:0 atIndex:0]; [c setBuffer:Wg offset:0 atIndex:1];
@@ -188,8 +238,12 @@ int main(int argc, const char** argv) { @autoreleasepool {
         gen_act((__fp16*)A.contents, na);
         gen_w((block_q4_0*)Wg.contents, nw); gen_w((block_q4_0*)Wu.contents, nw);
         memset(O1.contents,0,no*2); memset(O2.contents,0,no*2);
+        gWgp = [dev newBufferWithLength:nw*sizeof(block_q4_0) options:MTLResourceStorageModeShared];
+        gWup = [dev newBufferWithLength:nw*sizeof(block_q4_0) options:MTLResourceStorageModeShared];
+        repack((block_q4_0*)Wg.contents, (block_q4_0*)gWgp.contents, c.N, c.K);
+        repack((block_q4_0*)Wu.contents, (block_q4_0*)gWup.contents, c.N, c.K);
         run(c.M,c.N,c.K, c.fused?0:4, A,Wg,Wu,T0,T1,O1);
-        run(c.M,c.N,c.K, c.fused?2:5, A,Wg,Wu,T0,T1,O2);
+        run(c.M,c.N,c.K, c.fused?12:13, A,Wg,Wu,T0,T1,O2);
         std::vector<float> ref; cpu_ref((const __fp16*)A.contents,(const block_q4_0*)Wg.contents,
                                         c.fused?(const block_q4_0*)Wu.contents:nullptr, ref, c.M,c.N,c.K);
         auto cmp = [&](id<MTLBuffer> b, double& ma, double& cs) {
@@ -204,7 +258,7 @@ int main(int argc, const char** argv) { @autoreleasepool {
     }
 
     printf("\n=== TIMING at 8B shapes (GPU timestamps, median of 9 after 3 warmup) ===\n");
-    const char* names[9] = {"fused-scalar(upstream)","unfused-scalar","fused-sg BM32 BK32","unfused-simdgroup","down-scalar(upstream)","down-sg BM64 BK32","fused-sg BM64 BK32","fused-sg BM32 BK64","down-sg BM64 BK64"};
+    const char* names[14] = {"fused-scalar(upstream)","unfused-scalar","fused-sg 4sg BM32","unfused-simdgroup","down-scalar(upstream)","down-sg 4sg BM64","fused-sg BM64 BK32","fused-sg BM32 BK64","down-sg BM64 BK64","fused-sg 8sg BM64","down-sg 8sg BM128","down-sg 8sg BN128","fused-sg PACKED wts","down-sg PACKED wts"};
     for (uint M : {2048u}) {
         for (int part = 0; part < 2; part++) {
             uint N = part ? 4096 : 14336, K = part ? 14336 : 4096;
@@ -220,7 +274,11 @@ int main(int argc, const char** argv) { @autoreleasepool {
             prng = 1337;
             gen_act((__fp16*)A.contents, na);
             gen_w((block_q4_0*)Wg.contents, nw); gen_w((block_q4_0*)Wu.contents, nw);
-            int cfgs[2][5] = {{0,2,3,7,-1},{4,5,8,-1,-1}};
+            gWgp = [dev newBufferWithLength:nw*sizeof(block_q4_0) options:MTLResourceStorageModeShared];
+            gWup = [dev newBufferWithLength:nw*sizeof(block_q4_0) options:MTLResourceStorageModeShared];
+            repack((block_q4_0*)Wg.contents, (block_q4_0*)gWgp.contents, N, K);
+            repack((block_q4_0*)Wu.contents, (block_q4_0*)gWup.contents, N, K);
+            int cfgs[2][5] = {{0,2,9,12,-1},{4,5,13,-1,-1}};
             double base = 0;
             for (int ci = 0; ci < 5; ci++) {
                 int cfg = cfgs[part][ci];
@@ -231,7 +289,7 @@ int main(int argc, const char** argv) { @autoreleasepool {
                 for (int i = 0; i < 12; i++) { double a = run(M,N,K,cfg,A,Wg,Wu,T0,T1,out); if (i>=3) t.push_back(a); }
                 Stat s = stats(t);
                 if (ci == 0) base = s.med;
-                double flops = 2.0*M*N*K*((cfg==4||cfg==5||cfg==8)?1:2);
+                double flops = 2.0*M*N*K*((cfg==4||cfg==5||cfg==8||cfg==10||cfg==11||cfg==13)?1:2);
                 double maxd = 0;
                 if (ci > 0) {
                     const __fp16* a=(const __fp16*)Ob.contents; const __fp16* b=(const __fp16*)Oc.contents;

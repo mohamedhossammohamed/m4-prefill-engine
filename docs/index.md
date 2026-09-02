@@ -9,100 +9,69 @@
 
 ## The Problem: The Apple Silicon Inference Tradeoff
 
-Local LLM inference on Apple Silicon forces a painful choice:
+Local LLM inference on Apple Silicon currently forces a painful choice between three competing constraints:
 
-- **For speed**: Use Apple's MLX framework, but you're locked into MLX's proprietary 4-bit format and miss the massive GGUF ecosystem.
-- **For format flexibility**: Use `llama.cpp` (via Ollama/LM Studio) for GGUF compatibility, but accept a 20-40% prefill speed penalty on Apple Silicon.
-- **For long contexts**: Either crash with Out-Of-Memory errors when contexts exceed physical RAM, or accept severe performance degradation from SSD swap.
+1. **For speed:** Use Apple's MLX framework, but you are locked into MLX's proprietary 4-bit format and miss the massive, diverse GGUF ecosystem.
+2. **For format flexibility:** Use `llama.cpp` for GGUF compatibility, but accept a 20–40% prefill speed penalty on Apple Silicon due to generic tensor routing.
+3. **For long contexts:** Either crash with Out-Of-Memory (OOM) errors when contexts exceed physical RAM, or accept severe performance degradation from OS-level SSD swap.
 
-This project asks: **Can a single engine eliminate all three tradeoffs simultaneously?**
+This project asks: **Can a single, low-level Metal engine eliminate all three tradeoffs simultaneously?**
 
 ---
 
-## The Solution: A Unified Inference Architecture
+## The Solution: A Unified Inference Architecture (v0.2)
 
-This engine introduces three architectural innovations that work together to solve the tradeoff:
+By bypassing high-level framework abstractions and writing custom Metal shaders directly for the M4's Load-Store Units (LSU) and Hardware Matrix Coprocessor, this engine introduces three architectural pillars that solve the tradeoff.
 
-### 1. Compute-Bound Prefill (The 4-Brick Architecture)
+### Pillar 1: Compute-Bound Prefill (The 4-Brick Architecture)
+By unlocking Apple's hidden Hardware Matrix Coprocessor (`simdgroup_matrix`) and saturating the LSU with 128-bit vector firehoses, prefill becomes **compute-bound** rather than memory-bound. This frees resources for concurrent decode operations.
 
-By unlocking Apple's hidden Hardware Matrix Coprocessor (`simdgroup_matrix`) and saturating the Load-Store Units with 128-bit vector firehoses, prefill becomes **compute-bound** rather than memory-bound. This frees resources for concurrent operations.
+*   **Brick 1 (Hardware MMA):** Transitioned from standard Vector ALUs (~7.4 TFLOPS) to the 16.8 TFLOPS Hardware Matrix Coprocessor using 8×8 `simdgroup_matrix` fragments.
+*   **Brick 2 (Memory Ingestion):** 2D block-swizzled DRAM layout with 128-bit cooperative firehoses and padded threadgroup SRAM (`[64][36]`) to guarantee 1-cycle conflict-free bank broadcasts.
+*   **Brick 3 (Dual-SIMD SwiGLU):** Split Gate and Up projections across separate SIMDgroups to share input activations in SRAM, eliminating 7.68 GB of DRAM churn per 8B model layer.
+*   **Brick 4 (Barrier-Free FlashAttention):** Replaced expensive `threadgroup_barrier()` calls with `simd_shuffle_down` register butterfly trees for online softmax reductions, paired with dynamic Q8_0 KV cache compression.
 
-**The 4 Bricks:**
-- **Brick 1**: Hardware Matrix Coprocessor (`simdgroup_matrix<half, 8, 8>`) — 16.8 TFLOPS peak
-- **Brick 2**: 2D Block-Swizzled Memory + 128-bit Firehose + Padded SRAM (zero bank conflicts)
-- **Brick 3**: Dual-SIMDgroup SwiGLU Fusion (saves 7.68 GB DRAM churn on 8B models)
-- **Brick 4**: 2D BlockMMA FlashAttention with Dynamic Q8_0 KV Cache (2.3x-4.4x faster)
-
-**Result**: 3.4x to 3.7x speedup over optimized baselines, with prefill now compute-bound at M ≥ 128 tokens.
-
-### 2. Universal Quantization Router (GGUF, MLX, EXL, Ternary at MLX Speeds)
-
-A modular router decodes six quantization formats on-the-fly and feeds them into the same hardware-saturated pipeline:
+### Pillar 2: Universal Quantization Router
+A modular router decodes six distinct quantization formats on-the-fly, feeding them into the same hardware-saturated pipeline. This achieves MLX-native speeds across the broader open-source ecosystem.
 
 | Format | Bits/Weight | Status | Performance vs MLX |
-| :---: | :---: | :---: | :---: |
-| **Q4_0** (GGUF) | 4.5 | ✅ Production | Parity with MLX |
-| **MLX 4-bit** | 5.0 | ✅ Production | **1.05x-1.25x faster** (unaligned boundaries) |
-| **Q4_K** (GGUF Super-Blocks) | 4.5 | ✅ Production | Parity with MLX |
-| **EXL2** (Variable-Rate Affine) | 3-5 | ✅ Production | Parity with MLX |
-| **EXL3** (Hierarchical Codebook) | 4.5 | ✅ Production | Parity with MLX |
-| **Ternary 1.58-bit** (BitNet) | 3.0 (1.58 entropy) | ✅ Production | **1.3x-2.3x faster** at mid-lengths (SLC fit) |
+| :--- | :---: | :--- | :--- |
+| **Q4_0** (GGUF) | 4.5 | Production | Parity with MLX |
+| **MLX 4-bit** | 5.0 | Production | **1.05x–1.25x faster** on unaligned boundaries |
+| **Q4_K** (GGUF Super-Blocks) | 4.5 | Production | Parity with MLX |
+| **Variable-Rate Affine** | 3–5 | Production | Parity with MLX |
+| **EXL3** (Hierarchical Codebook) | 4.5 | Production | Parity with MLX |
+| **Ternary 1.58-bit** (BitNet) | 3.0 (1.58 entropy) | Production | **1.3x–2.3x faster** at mid-lengths (SLC fit) |
 
-**Result**: GGUF and experimental formats (EXL, Ternary) run at native Apple MLX speeds. You no longer sacrifice performance for format flexibility.
+*Note on Ternary 1.58-bit: Empirical testing reveals that on Apple Silicon, feeding unpacked Ternary weights into the 16.8 TFLOPS Hardware Matrix Coprocessor (MMA) is significantly faster than attempting pure Vector ALU addition/subtraction. The true advantage of Ternary on M4 is memory bandwidth (fitting entirely inside the 24MB SLC cache), not compute bypass.*
 
-### 3. 1M-Token Out-of-Core SSD Streaming
+### Pillar 3: 1M-Token Out-of-Core SSD Streaming
+When contexts exceed physical RAM (16GB), the engine treats the NVMe SSD as an extension of Unified Memory.
 
-When contexts exceed physical RAM (16GB), the engine treats the NVMe SSD as an extension of Unified Memory:
-
-- **macOS Direct-I/O** (`F_NOCACHE` with 16KB page-aligned buffers) bypasses the Unified Buffer Cache, achieving true NVMe DMA at 2.0-3.0 GB/s
-- **Chunked FlashAttention** with cross-chunk online softmax state persistence enables mathematically correct attention across arbitrarily long contexts
-- **Dual 128MB Ring Buffer** overlaps GPU compute with SSD streaming, hiding storage latency behind the Matrix Coprocessor
-
-**Result**: 1,000,000-token contexts run on a 16GB machine (consuming ~12.5 GB UMA, leaving 3.5 GB for macOS). Speculative verification at 1M context takes 1.72 seconds end-to-end (37 verified tok/s).
+*   **True NVMe DMA:** Utilizes `F_NOCACHE` with strictly 16KB page-aligned (`posix_memalign`) buffers to bypass the macOS Unified Buffer Cache (UBC), achieving 2.0–3.0 GB/s physical read throughput.
+*   **Chunked FlashAttention:** Online softmax running statistics are persisted to global memory between SSD chunks, enabling mathematically exact attention across arbitrarily long contexts.
+*   **Dual 128MB Ring Buffer:** Overlaps GPU compute with SSD streaming, hiding storage latency behind the Matrix Coprocessor.
 
 ---
 
-## Verified Performance Telemetry
+## Honest Benchmarking Methodology
 
-### Cross-Engine Prefill Comparison (Apple M4, 16GB UMA)
+All benchmarks adhere to strict systems-engineering rigor to ensure physical reality matches published claims:
 
-#### 8B Architecture (K=4096, H=32, D=128, 32 Layers)
+*   **Cold-Cache Isolation:** Mandatory 32MB SLC flushes before every format test to prevent cache pollution.
+*   **True GPU Timestamps:** Latencies measured using Metal's native `GPUStartTime` / `GPUEndTime`, isolating pure kernel compute from CPU driver overhead.
+*   **Edge-Case Validation:** Non-aligned sequence lengths (M ∈ [33, 127, 128, 129, 512, 1023, 1024, 2047, 2048]) verify causal masking and boundary guards.
+*   **Honest Verification:** CPU double-precision gold standards are strictly executed for M ≤ 2048. Larger scales (up to 1M) are explicitly labeled as GPU-only streaming, as O(M²) CPU verification is physically infeasible at that scale.
 
-| Prompt (M) | llama.cpp-style Baseline | Apple MLX | Our Engine (MLX Weights) | vs Baseline | vs MLX |
-| :---: | :---: | :---: | :---: | :---: | :---: |
-| **128** (Aligned) | 49.72 ms | 41.09 ms | **~28.50 ms** | 1.27x | **1.44x faster** |
-| **129** (Edge) | 79.93 ms | 67.74 ms | **~38.00 ms** | 1.47x | **1.78x faster** |
-| **2048** (Aligned) | 1075 ms | 612.59 ms | **~495 ms** | 1.41x | **1.24x faster** |
+### 1M-Token SSD Streaming Telemetry (Apple M4, 16GB UMA)
 
-#### 1B Architecture (K=2048, H=32, D=64, 16 Layers)
-
-| Prompt (M) | llama.cpp-style Baseline | Apple MLX | Our Engine (MLX Weights) | vs Baseline | vs MLX |
-| :---: | :---: | :---: | :---: | :---: | :---: |
-| **128** (Aligned) | 10.07 ms | 6.33 ms | **~4.20 ms** | 1.53x | **1.51x faster** |
-| **129** (Edge) | 14.79 ms | 8.24 ms | **~5.10 ms** | 1.62x | **1.62x faster** |
-| **2048** (Aligned) | 240.84 ms | 126.09 ms | **~82.00 ms** | 1.69x | **1.54x faster** |
-
-*Note: The llama.cpp-style baseline is an in-house Metal reimplementation of `ggml`'s `kernel_mul_mm_q4_0`, calibrated to ~8-10 TFLOPS on M4. Full 1B and 8B telemetry with variance bounds is available in `benchmarks/logs/`.*
-
-### 1M-Token SSD Streaming Telemetry
-
-| Context (M) | Execution Mode | End-to-End | GPU Compute | SSD Read BW | Peak UMA |
-| :---: | :---: | :---: | :---: | :---: | :---: |
+| Context (M) | Execution Mode | End-to-End | GPU Compute | SSD Read BW | Peak UMA Footprint |
+| :--- | :--- | :---: | :---: | :---: | :---: |
 | **64K** | Mode A (Full Causal) | 9.48 s | 9.23 s | 2.0 GB/s | 7.0 GB |
 | **128K** | Mode A (Full Causal) | 37.09 s | 36.67 s | 2.4 GB/s | 11.1 GB |
 | **1M** | Mode B (Spec K=64) | **1.72 s** | **1.67 s** | **2.7 GB/s** | **12.5 GB** |
 
----
-
-## Benchmarking Methodology
-
-All benchmarks adhere to strict systems-engineering rigor:
-
-- **True GPU Hardware Timestamps**: Latencies measured using Metal's native `GPUStartTime` / `GPUEndTime`, isolating pure kernel compute from CPU driver overhead
-- **Cold-Cache Isolation**: 32MB SLC flush before every format test to prevent cache pollution
-- **Edge-Case Validation**: Non-aligned sequence lengths (M ∈ [33, 127, 128, 129, 512, 1023, 1024, 2047, 2048]) verify causal masking and boundary guards
-- **Numerical Correctness**: All formats verified against double-precision CPU ground truth (MaxDiff ≤ 0.05, zero NaN/Inf)
-- **Thermal Honesty**: 60-second sustained stress tests on fanless M4 chassis (0.20% thermal degradation over 12,509 passes)
+*Note: Full causal streaming (Mode A) is capped at 128K tokens due to state buffer constraints. 256K to 1M contexts utilize speculative burst verification (Mode B). At 1M tokens, the engine consumes 12.5 GB of physical UMA (`phys_footprint`), leaving ~3.5 GB for macOS.*
 
 ---
 
@@ -110,20 +79,20 @@ All benchmarks adhere to strict systems-engineering rigor:
 
 **This is a research artifact and proof-of-concept.**
 
-It is **not** a drop-in replacement for `llama.cpp`, Ollama, or consumer LLM frontends. It requires:
-- Manual compilation with Apple Metal toolchain (`make`)
-- Command-line execution
-- Synthetic weight generation (no `.gguf` file loading yet)
+It is **not** intended as a drop-in replacement for everyday `llama.cpp` users, Ollama, or consumer LLM frontends. It currently requires:
+*   Manual compilation with the Apple Metal toolchain (`make`).
+*   Command-line execution.
+*   Synthetic weight generation (matching LLaMA shapes) to isolate pure silicon execution from disk I/O.
 
-The goal is to provide a verified, open-source baseline for the community. These optimizations are intended to be upstreamed into mainstream frameworks (`ggml-metal`, `MLX`) or adopted as specialized hardware configurations.
+The goal of this repository is to provide a verified, open-source baseline for the community. These optimizations are intended to be upstreamed into mainstream frameworks (`ggml-metal`, `MLX`) or adopted as specialized hardware configurations.
 
 ---
 
 ## Building and Running
 
 ### Prerequisites
-- Apple Silicon Mac (M4/M5) running macOS 14.0+
-- Xcode Command Line Tools (`xcode-select --install`)
+*   Apple Silicon Mac (M4/M5) running macOS 14.0+
+*   Xcode Command Line Tools (`xcode-select --install`)
 
 ### Compilation & Execution
 
@@ -160,7 +129,7 @@ make clean && make
 
 ### The Official License
 Copyright 2026 Mohammed Hossam.  
-This project is officially and legally licensed under the **Apache License 2.0**.
+This project is officially and legally licensed under the **Apache License 2.0**. You are free to use, modify, and distribute this code in accordance with the terms of the Apache 2.0 license.
 
 ### Officially the Unofficial License of the Project
 In addition to the Apache 2.0 license, this project proudly operates under the [`no-theo-license`](https://github.com/maria-rcks/no-theo-license) until **March 31, 2027**.
@@ -175,11 +144,13 @@ I am currently early in my engineering career, and building this engine has been
 
 If the ideas, techniques, or specific hardware-level optimizations from this repository (such as the M4 LSU saturation methods, Universal Quantization Router, 1M SSD streaming architecture, or Metal-specific prefill routing) are adapted, ported to other silicon architectures (AMD/Nvidia/Intel), or used to improve decoding phases in other software, I humbly ask for a **visible citation, link, or mention** in your project's documentation, blog post, or research paper.
 
-Any visibility that helps a junior engineer grow and find their footing in the systems engineering community is deeply and genuinely appreciated.
+Any visibility that helps a junior engineer grow and find their footing in the systems engineering community is deeply and genuinely appreciated. Thank you for reading, testing, and building.
 
 ---
 
 ## Contact & Discussion
 
-- **X (Twitter):** [Mohammed Hossam (@MohamedHz72007)](https://x.com/MohamedHz72007)
-- **GitHub:** [mohamedhossammohamed](https://github.com/mohamedhossammohamed)
+If you want to discuss Metal optimization, Apple Silicon memory hierarchies, or LLM inference, feel free to reach out:
+
+*   **X (Twitter):** [Mohammed Hossam (@MohamedHz72007)](https://x.com/MohamedHz72007)
+*   **GitHub:** [mohamedhossammohamed](https://github.com/mohamedhossammohamed)

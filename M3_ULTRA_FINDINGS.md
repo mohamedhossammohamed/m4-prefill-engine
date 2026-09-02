@@ -505,3 +505,61 @@ Cold, same shapes, same machine, same session:
    8192: 62.099 (IQR 0.479) -> 9.171 (0.071) and 231.763 (1.838) -> 35.149 (0.291).
 5. Build and benchmark instructions reproduce from a clean checkout -- **met**, see the
    README section. `make` needs no Xcode; shaders compile at runtime.
+
+---
+
+# Addendum — 8-simdgroup fused MLP (shipped)
+
+The `NSG` (simdgroups per threadgroup) and `BN` (column tile) knobs were the last two
+unparameterised dimensions. Sweeping them at M=2048:
+
+| variant | threads | gate/up ms | down ms |
+|---|---|---|---|
+| 4 simdgroups, 16 cols each (previous) | 128 | 21.828 | **10.808** |
+| **8 simdgroups, 8 cols each, BM=64 (fused)** | 256 | **21.402** | 11.669 |
+| 8 simdgroups, 16 cols each (BN=128) | 256 | - | 11.160 |
+
+**The fused kernel wins with 8 simdgroups; the plain kernel loses.** Same mechanism, opposite
+sign: doubling the simdgroups at a fixed column tile halves the columns each one owns, which
+halves the matrix-multiplies issued per operand load. The fused kernel does two multiplies
+per load (gate and up share the A operand), so it still has the intensity to absorb it and
+banks the occupancy gain; the plain kernel does one, so it does not. Widening the tile to 128
+columns to restore the ratio costs threadgroup memory and loses too, consistent with every
+other measurement here.
+
+Shipped: `sg_gemm_q4_0_fused_swiglu_wide` (8 simdgroups, BM=64, 12 KB) for the MLP, plain
+GEMM unchanged at 4 simdgroups.
+
+## Final numbers
+
+| stage | untuned upstream | shipped | cold MLX |
+|---|---|---|---|
+| QKV projections (x3) | 12.418 | **9.293** | 9.198 |
+| causal attention (FP16 KV) | 17.24 | **1.573** | 2.088 |
+| causal attention (Q8_0 KV) | 17.27 | **1.348** | - |
+| output projection | 4.19 | **3.163** | 3.051 |
+| MLP SwiGLU + down | 60.26 | **32.288** | 30.096 |
+| **total / layer (Q8_0 KV)** | **94.15** | **46.16** | 44.43 |
+| 32-layer prefill | 3013 ms | **1477 ms** | - |
+| throughput | 21,752 tok/s | **44,364 tok/s** | |
+
+**94.15 -> 46.16 ms/layer, 2.04x over the untuned upstream engine, 2.42x over its own
+baseline kernels, 96.3% of a cold MLX reference.** Per stage: within 1.0% (QKV), 3.7%
+(O-proj) and 7.3% (MLP) of MLX.
+
+| configuration | layer ms | tok/s | gates |
+|---|---|---|---|
+| ported (default) | **46.143** | 44,222 | 6 PASS / 0 FAIL |
+| `M3_SG_ATTN=0` | 61.982 | 33,077 | 6 PASS / 0 FAIL |
+| `M3_SG_GEMM=0` | 78.213 | 26,135 | 6 PASS / 0 FAIL |
+| both `=0` (fully original) | 94.102 | 21,780 | 6 PASS / 0 FAIL |
+
+Sustained: 4 back-to-back runs, 46.143-46.164 ms (0.05% spread), 24 gates, 0 failures,
+swap 0.00 M. Fidelity unchanged from the previous phase at every gate.
+
+## Process note
+The wiring for this kernel was swept into the "Rebrand as the M3 Prefill Engine" commit by a
+`git add -A`, so a documentation commit silently carried a kernel change and the README then
+shipped stale numbers plus a limitation that was no longer true. Both are corrected here.
+The measurement itself was unaffected -- the sweep and the validation above were run against
+the wired build.

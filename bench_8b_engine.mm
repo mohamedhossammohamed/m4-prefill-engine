@@ -356,7 +356,7 @@ int main(int argc, const char* argv[]) {
         id<MTLComputePipelineState> pso_pipe_qkv_head       = load_pso(
             sg_gemm_enabled() ? @"sg_qkv_head_gemm_q4_0" : @"pipe_qkv_head_gemm_q4_0");
         id<MTLComputePipelineState> pso_fused_gate_up       = load_pso(
-            sg_gemm_enabled() ? @"sg_gemm_q4_0_fused_swiglu" : @"fused_gate_up_swiglu_q4_0");
+            sg_gemm_enabled() ? @"sg_gemm_q4_0_fused_swiglu_wide" : @"fused_gate_up_swiglu_q4_0");
         std::cout << "[+] Q4_0 GEMM kernels: "
                   << (sg_gemm_enabled() ? "simdgroup_matrix (M3 Ultra port)" : "scalar half4 (upstream M4)")
                   << std::endl;
@@ -533,11 +533,11 @@ int main(int argc, const char* argv[]) {
                 [enc setBytes:&M length:sizeof(uint32_t) atIndex:4];
                 [enc setBytes:&N_MLP length:sizeof(uint32_t) atIndex:5];
                 [enc setBytes:&K length:sizeof(uint32_t) atIndex:6];
-                [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 10240 : 4096) atIndex:0];
-                MTLSize grid_mlp_up = sg_gemm_enabled() ? MTLSizeMake((N_MLP + 63) / 64, (M + 31) / 32, 1)
+                [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 12288 : 4096) atIndex:0];
+                MTLSize grid_mlp_up = sg_gemm_enabled() ? MTLSizeMake((N_MLP + 63) / 64, (M + 63) / 64, 1)
                                                         : MTLSizeMake((N_MLP + 31) / 32, (M + 31) / 32, 1);
                 [enc dispatchThreadgroups:grid_mlp_up
-                    threadsPerThreadgroup:(sg_gemm_enabled() ? MTLSizeMake(128, 1, 1) : tg_size_32)];
+                    threadsPerThreadgroup:(sg_gemm_enabled() ? MTLSizeMake(256, 1, 1) : tg_size_32)];
 
                 // Stage E: Down-Projection [M, N_MLP] -> [M, K]
                 [enc setComputePipelineState:pso_pipe_gemm_32x32];
@@ -663,11 +663,11 @@ int main(int argc, const char* argv[]) {
                 [enc setBytes:&M length:sizeof(uint32_t) atIndex:4];
                 [enc setBytes:&N_MLP length:sizeof(uint32_t) atIndex:5];
                 [enc setBytes:&K length:sizeof(uint32_t) atIndex:6];
-                [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 10240 : 4096) atIndex:0];
-                MTLSize grid_mlp_up = sg_gemm_enabled() ? MTLSizeMake((N_MLP + 63) / 64, (M + 31) / 32, 1)
+                [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 12288 : 4096) atIndex:0];
+                MTLSize grid_mlp_up = sg_gemm_enabled() ? MTLSizeMake((N_MLP + 63) / 64, (M + 63) / 64, 1)
                                                         : MTLSizeMake((N_MLP + 31) / 32, (M + 31) / 32, 1);
                 [enc dispatchThreadgroups:grid_mlp_up
-                    threadsPerThreadgroup:(sg_gemm_enabled() ? MTLSizeMake(128, 1, 1) : tg_size_32)];
+                    threadsPerThreadgroup:(sg_gemm_enabled() ? MTLSizeMake(256, 1, 1) : tg_size_32)];
 
                 [enc setComputePipelineState:pso_pipe_gemm_32x32];
                 [enc setBuffer:d_S_mlp offset:0 atIndex:0];
@@ -1144,11 +1144,11 @@ int main(int argc, const char* argv[]) {
                     [enc setBytes:&M length:sizeof(uint32_t) atIndex:4];
                     [enc setBytes:&N_MLP length:sizeof(uint32_t) atIndex:5];
                     [enc setBytes:&K length:sizeof(uint32_t) atIndex:6];
-                    [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 10240 : 4096) atIndex:0];
-                    MTLSize grid_mlp_up = sg_gemm_enabled() ? MTLSizeMake((N_MLP + 63) / 64, (M + 31) / 32, 1)
+                    [enc setThreadgroupMemoryLength:(sg_gemm_enabled() ? 12288 : 4096) atIndex:0];
+                    MTLSize grid_mlp_up = sg_gemm_enabled() ? MTLSizeMake((N_MLP + 63) / 64, (M + 63) / 64, 1)
                                                             : MTLSizeMake((N_MLP + 31) / 32, (M + 31) / 32, 1);
                     [enc dispatchThreadgroups:grid_mlp_up
-                        threadsPerThreadgroup:(sg_gemm_enabled() ? MTLSizeMake(128, 1, 1) : tg_size_32)];
+                        threadsPerThreadgroup:(sg_gemm_enabled() ? MTLSizeMake(256, 1, 1) : tg_size_32)];
 
                     [enc setComputePipelineState:pso_pipe_gemm_32x32];
                     [enc setBuffer:d_S_mlp offset:0 atIndex:0];

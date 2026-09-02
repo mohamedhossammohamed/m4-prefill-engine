@@ -144,17 +144,17 @@ shipped them as separate near-identical copies.
 
 | stage | upstream on this machine | ported | speedup |
 |---|---|---|---|
-| QKV projections (x3) | 12.418 ms | **9.527** | 1.30x |
-| causal attention (FP16 KV) | 17.24 ms | **1.576** | 10.9x |
-| causal attention (Q8_0 KV) | 17.27 ms | **1.354** | 12.8x |
-| output projection | 4.19 ms | **3.245** | 1.29x |
-| MLP SwiGLU + down | 60.26 ms | **33.424** | 1.80x |
-| **total / layer** | **94.15 ms** | **47.62** | **1.98x** |
-| 32-layer prefill | 3013 ms | **1524 ms** | 1.98x |
-| throughput | 21,752 tok/s | **43,011 tok/s** | |
+| QKV projections (x3) | 12.418 ms | **9.293** | 1.34x |
+| causal attention (FP16 KV) | 17.24 ms | **1.573** | 11.0x |
+| causal attention (Q8_0 KV) | 17.27 ms | **1.348** | 12.8x |
+| output projection | 4.19 ms | **3.163** | 1.32x |
+| MLP SwiGLU + down | 60.26 ms | **32.288** | 1.87x |
+| **total / layer** | **94.15 ms** | **46.16** | **2.04x** |
+| 32-layer prefill | 3013 ms | **1477 ms** | 2.04x |
+| throughput | 21,752 tok/s | **44,364 tok/s** | |
 
 Against the engine's own baseline kernels the ratio goes from 1.19x to **2.35x**. Against a
-cold MLX reference for the same layer (44.43 ms) the engine moves from 47% to **93%**.
+cold MLX reference for the same layer (44.43 ms) the engine moves from 47% to **96.3%**.
 
 ### The two findings worth carrying upstream
 
@@ -213,4 +213,7 @@ M3_SG_ATTN=0 M3_SG_GEMM=0 ./bench_8b_engine   # fully upstream
   confirmed by the resulting speedups, not read off a counter.
 * The new kernels are **not double-buffered**; the upstream ones were. Occupancy provides
   the latency hiding instead. Re-adding double buffering is untested headroom.
-* MLP is still ~11% behind MLX, the largest remaining per-stage gap.
+* MLP is still ~7% behind MLX, the largest remaining per-stage gap.
+* Tile parameters were swept under a register-budget constraint (`BM`, `BK`, `BN`, simdgroups
+  per threadgroup); the negative results are recorded in `M3_ULTRA_FINDINGS.md` alongside the
+  wins, because two of them looked like free money on paper.

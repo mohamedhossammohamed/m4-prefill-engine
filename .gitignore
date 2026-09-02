@@ -17,3 +17,5 @@ bench_8b_engine
 attn_sg_bench
 mlp_bench
 sgprobe
+roofline_probe
+occupancy_probe

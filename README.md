@@ -112,7 +112,8 @@ M3 Ultra it is not, and the measurements are not close:
 
 | | measured on this machine |
 |---|---|
-| memory bandwidth ceiling | **694 GB/s** (87% of ~800 theoretical) |
+| memory bandwidth ceiling, read-only | **776 GB/s** (95% of 819.2 theoretical) |
+| memory bandwidth ceiling, read+write | **695 GB/s** (85%) |
 | bandwidth the engine actually used | **1.5 GB/s — 0.2% of it** |
 | FP16 / Q4 GEMM reference (MLX, same shapes) | **24.8 TFLOP/s** |
 | upstream causal attention | **2.0 TFLOP/s — 8% of that** |
@@ -211,9 +212,39 @@ M3_SG_ATTN=0 M3_SG_GEMM=0 ./bench_8b_engine   # fully upstream
   counters -- the Metal Debugger needs full Xcode, and this machine has Command Line Tools
   only. Occupancy claims are inferred from register/threadgroup-memory arithmetic and
   confirmed by the resulting speedups, not read off a counter.
-* The new kernels are **not double-buffered**; the upstream ones were. Occupancy provides
-  the latency hiding instead. Re-adding double buffering is untested headroom.
+* The new kernels are **not double-buffered**; the upstream ones were. This began as untested
+  headroom and became a reasoned rejection: double buffering doubles the staged tiles, and
+  every tile measurement here says threadgroup memory is the binding constraint.
+* Attention `BC` was swept: 32 is 1.3% slower for 44% more threadgroup memory, so 16 stays.
 * MLP is still ~7% behind MLX, the largest remaining per-stage gap.
 * Tile parameters were swept under a register-budget constraint (`BM`, `BK`, `BN`, simdgroups
   per threadgroup); the negative results are recorded in `M3_ULTRA_FINDINGS.md` alongside the
   wins, because two of them looked like free money on paper.
+
+### Verification pass (corrections to the above)
+
+Re-checked with two probes added in this branch, `occupancy_probe` and `roofline_probe`.
+Full detail in `M3_ULTRA_FINDINGS.md`.
+
+* **The bandwidth ceiling was mislabelled.** 694 GB/s came from an MLX read+write elementwise
+  op. Measured directly: **776 GB/s read-only** (95% of 819.2 theoretical), 695 GB/s read+write
+  -- which reproduces the MLX figure independently, so the number was right for what it
+  measured and wrong as a reference for weight streaming, which is read-dominated. The
+  conclusion (nothing is bandwidth-bound) is unaffected and slightly strengthened.
+* **A register-spill claim is withdrawn.** The 64-row-tile negative result was attributed
+  partly to register spilling. `occupancy_probe` reports `maxTotalThreadsPerThreadgroup = 1024`
+  for all 16 kernels *including that one*, so the compiler applied no register-driven
+  threadgroup limit anywhere. The 32 KB of threadgroup memory -- the full per-threadgroup
+  budget, so one threadgroup per core -- explains it on its own.
+* **No cross-die knee exists.** Coalesced read bandwidth climbs monotonically to 776 GB/s and
+  is flat from 160 to 10,240 threadgroups (40K to 2.6M threads). Metal exposes no die-affinity
+  control either, so there is nothing to tile against in principle.
+* **Access pattern is worth up to 3.09x at matched thread counts** (784.9 vs 254.3 GB/s at 320
+  threadgroups). `sgg_load_b` sits in the scattered regime: weights are `[n][k_block]`, so
+  adjacent thread-pairs read q4_0 blocks `num_kb * 18` bytes apart (2,304 B at K=4096) and each
+  18-byte block is read twice. Repacking to `[k_block][n]` at load time is the top remaining
+  lead; not attempted here because it changes the weight layout.
+* **GPU counters are unreachable on the test machine.** `MTLDevice.counterSets` exposes only
+  `timestamp` -- no `stageutilization`, no `statistic`, and dispatch-boundary sampling is
+  unsupported. Those need Instruments, which needs full Xcode. The occupancy reasoning here is
+  inferred, not counter-verified, which is exactly how the withdrawn claim went wrong.

@@ -563,3 +563,104 @@ The wiring for this kernel was swept into the "Rebrand as the M3 Prefill Engine"
 shipped stale numbers plus a limitation that was no longer true. Both are corrected here.
 The measurement itself was unaffected -- the sweep and the validation above were run against
 the wired build.
+
+---
+
+# Verification pass — corrections to earlier claims
+
+Re-checked the published claims with two new instruments (`occupancy_probe`, `roofline_probe`).
+Three needed correcting; all three were published, two of them on the upstream repo.
+
+## 1. The bandwidth ceiling was mislabelled (694 GB/s -> 776 read / 695 read+write)
+
+The 694 GB/s figure came from MLX's `x * 1.0` elementwise op, which **reads and writes**.
+Measured directly, coalesced:
+
+| | GB/s | % of 819.2 theoretical |
+|---|---|---|
+| read-only | **776** | 95% |
+| read+write | **695** | 85% |
+| read-only, scattered access | 729 (only at 2.6M threads) | 89% |
+
+The 695 read+write figure reproduces MLX's 694 independently, so the number was never wrong --
+it was labelled "the memory bandwidth ceiling" when the workload it was being compared against
+(weight streaming) is read-dominated. The correct roofline reference for that is **776 GB/s**.
+The conclusion is unaffected and slightly strengthened: the engine's 1.5 GB/s is 0.19% of the
+read ceiling rather than 0.22%.
+
+## 2. "Spills registers" was unsupported and is withdrawn
+
+The BM=64 negative result was attributed to "registers spill and occupancy collapses."
+`occupancy_probe` queries `maxTotalThreadsPerThreadgroup` for every kernel in the file --
+the compiler's own register-allocation verdict, which drops below 1024 when a kernel is
+register-starved:
+
+```
+sg_gemm_q4_0_fused_swiglu_bm64            1024       32          0
+sg_gemm_q4_0_fused_swiglu_wide            1024       32          0
+flash_attn_sg_causal_d128                 1024       32          0
+...  (all 16 kernels report 1024)
+```
+
+Every kernel reports the device maximum, including the 27x-slower one. The compiler applied no
+register-driven threadgroup limit anywhere, so the spilling half of the explanation has no
+support and is withdrawn. The threadgroup-memory half stands on its own and is sufficient:
+32 KB is the full per-threadgroup budget, so exactly one threadgroup fits per core.
+
+Caveat on the instrument: `maxTotalThreadsPerThreadgroup = 1024` rules out a register-driven
+*threadgroup-size* limit; it does not strictly rule out spilling to device memory. It is the
+only register signal reachable without Xcode, and it does not support the claim that was made.
+
+## 3. Attention `BC` is no longer "never swept"
+
+Swept: `BC=32` is **1.3% slower** (2.463 vs 2.432 ms at M=2048) and needs 44% more threadgroup
+memory (23,552 vs 16,384 B) -- the same pattern as every other tile experiment. The variant
+also had an unresolved numerical defect (max-abs 0.20 vs the CPU reference), and since fixing
+it could not change the tile's memory footprint or its work, it was **reverted rather than
+shipped**. The timing is still informative because a numerical bug does not change the shape
+of the work; the memory footprint is what loses.
+
+## 4. GPU counters are unreachable on this machine (lever 1, blocked)
+
+`MTLDevice.counterSets` on the M3 Ultra exposes exactly one set:
+
+```
+counterSets: 1
+  set 'timestamp'  (1 counters)
+      GPUTimestamp
+common 'stageutilization': no
+common 'statistic': no
+sampling: atStageBoundary=1 atDispatchBoundary=0
+```
+
+No `stageutilization` (ALU / memory utilisation), no `statistic` (occupancy, instruction
+counts), and dispatch-boundary sampling is unsupported. Those live behind Instruments, which
+needs full Xcode; this machine has Command Line Tools only. So the occupancy story remains
+**inferred from threadgroup-memory and register arithmetic plus the resulting speedups** --
+which is exactly how claim 2 above went wrong, and why it is worth stating plainly rather than
+burying in a limitations list.
+
+## 5. No cross-die knee (lever 2, negative result)
+
+The plan predicted a threadgroup count where UltraFusion traffic degrades scaling, and advised
+tiling to keep a threadgroup's working set on one die. There is no such knee: coalesced read
+bandwidth climbs monotonically to 776 GB/s and is **flat from 160 to 10,240 threadgroups**
+(40K to 2.6M threads). Metal also exposes no die-affinity control, so there is nothing to tile
+against even in principle. The hypothesis is refuted for this workload class.
+
+What the sweep found instead is an access-pattern effect worth up to **3.09x at matched thread
+counts** (784.9 vs 254.3 GB/s at 320 threadgroups), converging only once the grid is large
+enough to make per-thread runs short.
+
+**This is the top remaining lead for the MLP gap.** `sgg_load_b` is in the scattered regime:
+weights are `[n][k_block]`, so adjacent thread-pairs read q4_0 blocks `num_kb * 18` bytes apart
+(2,304 B at K=4096), and each 18-byte block is read twice, once per thread of the pair. At
+M=2048 the gate/up weight traffic is ~2.1 GB over 21.4 ms -- about 98 GB/s against a ~254 GB/s
+scattered ceiling. Repacking to `[k_block][n]` at load time would make those reads contiguous.
+Not attempted: it changes the on-disk weight layout, which is a bigger decision than a tile
+parameter.
+
+## Engine unchanged
+All experiments in this pass were reverted; the shipped engine is byte-identical and
+re-verified: 46.152 ms/layer at M=2048, 6 PASS / 0 FAIL, stage times matching the published
+table to within run-to-run noise.

@@ -41,7 +41,7 @@ struct block_var_rate_affine {
     uint8_t scales[8];   // 8 x sub-block scales (8 bytes)
     uint8_t biases[8];   // 8 x sub-block biases (8 bytes)
     uint8_t modes[8];    // 8 x sub-block mode & permutation metadata (8 bytes)
-    uint8_t _pad[12];    // alignment padding to 160 bytes (12 bytes)
+    uint8_t _pad[4];     // alignment padding to 160 bytes (4 bytes)
     uint8_t qs[128];     // Multi-bit packed quant payload stream (128 bytes)
 };
 

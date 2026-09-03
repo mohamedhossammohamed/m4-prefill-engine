@@ -243,3 +243,48 @@ Measured on **Apple M4 (10-Core GPU, 16GB UMA)** using `bench_universal_router` 
 | | Ternary MMA | 3.00 | 21.960 ms | 3.13 | 1.8 GB/s | 93,261 | 31,086.9 | 1.00x |
 | | Var-Rate Affine | 5.00 | 26.426 ms | 2.60 | 1.7 GB/s | 77,498 | 15,499.6 | 0.83x |
 | | EXL3 Codebook | 4.50 | 28.276 ms | 2.43 | 1.5 GB/s | 72,429 | 16,095.4 | 0.78x |
+
+---
+
+## 6. Dynamic Codec Registry Architecture (v0.2.3)
+
+To transition from static compile-time enums to an extensible architecture obeying the **Open-Closed Principle**, v0.2.3 introduces the host-side dynamic quantization registry ([`src/router/quant_registry.h`](file:///Users/mohammedhossam/Documents/antigravity/wonderful-darwin/src/router/quant_registry.h)):
+
+```cpp
+struct QuantCodecDescriptor {
+    QuantFormat format;
+    std::string name;
+    std::string description;
+    uint32_t block_size;
+    size_t struct_size;
+    double bits_per_weight;
+    std::string gemm_kernel_name;
+    std::string head_gemm_kernel_name;
+    std::function<void(const void* src, void* dst, size_t count)> quantize_fn;
+    std::function<void(const void* src, float* dst, size_t count)> dequantize_fn;
+};
+```
+
+### Self-Registering Codecs
+New quantization formats declare their metadata and bind to the pipeline without modifying central dispatch files:
+
+```cpp
+REGISTER_QUANT_CODEC((metal_llm::QuantCodecDescriptor{
+    core::memory::QUANT_CUSTOM,
+    "CUSTOM_FORMAT",
+    "Experimental custom quantization format",
+    32,
+    sizeof(block_custom),
+    4.00,
+    "quant_router_gemm_custom_64x64",
+    "quant_router_head_gemm_custom_64x64",
+    nullptr,
+    nullptr
+}));
+```
+
+The runtime registry (`QuantRegistry::instance()`) exposes:
+* Dynamic format lookup by enum (`get(format)`) or string identifier (`get_by_name("MLX_4BIT")`).
+* Exact buffer byte sizing calculations (`compute_weight_bytes(format, count)`).
+* Automatic validation of block size and 128-bit LSU alignment constraints repo-wide.
+

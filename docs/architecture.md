@@ -207,4 +207,63 @@ When all 4 Bricks are composed into a unified transformer layer forward pass (`u
 4. **Out-Projection (Brick 1):** Dense linear projection with residual accumulator addition.
 5. **Fused SwiGLU MLP (Brick 3):** Gate/Up dual-SIMD projection + in-register SiLU + Down projection.
 
-This complete composition eliminates memory bottlenecks and anchors LLM prefill firmly to the Apple M4 Matrix Coprocessor's 16.8 TFLOPS ceiling.
+This complete composition eliminates memory bottlenecks and anchors LLM prefill firmly toward the Apple M4 Matrix Coprocessor's theoretical hardware peak of ~16.8 TFLOPS.
+
+---
+
+## 7. Modular Decoupled MSL Architecture (v0.2.3)
+
+To allow experimental extensions and clean separation of concerns without duplicating thousands of lines of AMX matrix loops, the engine introduces a decoupled header-only MSL library (`include/metal/`):
+
+```
+  ┌─────────────────────────────────────────────────────────────┐
+  │         Layer Coordinator (TransformerLayerCoordinator)     │
+  └──────────────────────────────┬──────────────────────────────┘
+                                 │
+     ┌───────────────────────────┼────────────────────────────┐
+     ▼                           ▼                            ▼
+┌──────────────────┐   ┌───────────────────┐        ┌───────────────────┐
+│ gemm_mma.metal   │   │ swiglu_dual_simd  │        │ flash_attention   │
+│ <TCodec, DIRECT> │   │ <TCodec>          │        │ <HeadDim D>       │
+└────────┬─────────┘   └─────────┬─────────┘        └─────────┬─────────┘
+         │                       │                            │
+         └───────────────────────┼────────────────────────────┘
+                                 ▼
+                 ┌───────────────────────────────┐
+                 │ Quantization Codecs (TCodec)  │
+                 │ • q4_0.metal                  │
+                 │ • mlx_4bit.metal              │
+                 │ • q4_k.metal                  │
+                 │ • ternary_1_58.metal          │
+                 │ • var_rate_affine.metal       │
+                 │ • exl3.metal                  │
+                 └───────────────────────────────┘
+```
+
+### Key Modular Components
+
+1. **Templated BlockMMA Core (`include/metal/ops/gemm_mma.metal`):**
+   ```metal
+   template <typename TCodec, bool DIRECT_HEAD_ROUTING = false>
+   inline void block_mma_64x64_gemm_core(...) { ... }
+   ```
+   Parameterized by `TCodec`, which only requires a single static function:
+   `TCodec::unpack_column(B, col, kb, K, sh_B, linear_tid)`.
+   The outer-product AMX coprocessor matrix accumulation, double-buffered threadgroup SRAM staging, and writeback logic are implemented once and reused across all formats.
+
+2. **Dual-SIMD Cooperative SwiGLU Core (`include/metal/ops/swiglu_dual_simd.metal`):**
+   ```metal
+   template <typename TCodec>
+   inline void swiglu_mma_dual_simd_core(...) { ... }
+   ```
+   Evaluates Gate and Up projections concurrently in threadgroup registers using `TCodec`, computes in-SRAM $\text{SiLU}(\text{Gate}) \times \text{Up}$ activation, and writes directly to DRAM with zero intermediate global memory footprint.
+
+3. **Barrier-Free FlashAttention Core (`include/metal/ops/flash_attention.metal`):**
+   ```metal
+   template <uint D>
+   inline void flash_attn_mma_64x64_fp16_core(...) { ... }
+   ```
+   Parameterized on head dimension $D \in \{64, 128\}$. Implements online softmax tracking and tensor-core accumulation using intra-warp register butterfly reductions (`simd_shuffle_down`).
+
+4. **Runtime Shader Preprocessor (`core/metal/shader_loader.mm`):**
+   Transparently resolves relative `#include "..."` directives and `#pragma once` guards at runtime, creating self-contained compilation translation units for `newLibraryWithSource:options:error:` without external build-time preprocessors.

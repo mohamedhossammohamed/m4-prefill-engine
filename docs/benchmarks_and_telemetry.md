@@ -22,11 +22,20 @@ All data in this repository was acquired on physical hardware adhering to strict
  └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Metrological Invariants
-1. **True GPU Hardware Timestamps:** Kernel execution times are captured using Metal's hardware counters (`commandBuffer.GPUStartTime` and `commandBuffer.GPUEndTime`), completely isolating kernel execution from CPU driver overhead.
-2. **Shared Wall-Clock Parity:** Cross-engine comparisons against Apple MLX measure total host wall-clock time (`commit` + `waitUntilCompleted` for Metal vs `mx.eval` for MLX).
-3. **Cold-Cache Isolation:** A mandatory 32MB synthetic buffer sweep (`memset` + read) is executed prior to every benchmark run to flush the 24MB SLC cache and prevent warm-cache distortion.
-4. **Variance Sampling:** All reported values represent the median of **20 measured iterations** following **10 discarded warmup iterations**, with full `[min - max]` distributions recorded.
+### The 11 Programmatic Metrological Invariants (v0.2.3)
+To prevent benchmarking artifacts, warm-cache illusions, or silent NaN corruptions, the engine enforces 11 programmatic invariants via [`core/metrology/`](file:///Users/mohammedhossam/Documents/antigravity/wonderful-darwin/core/metrology/) and [`core/memory/`](file:///Users/mohammedhossam/Documents/antigravity/wonderful-darwin/core/memory/):
+
+1. **16KB Direct I/O Page Alignment:** All I/O buffers are allocated via `posix_memalign` at 16,384 bytes, validated by `assert_16kb_aligned()`.
+2. **32MB UBC & SLC Eviction:** Cold starts execute a dummy 32MB Direct I/O write (`F_NOCACHE` + `fsync`) and 32MB buffer sweep, flushing macOS UBC and the 24MB hardware SLC cache.
+3. **Honest Verification Labeling:** Forbids unproven verification claims; tests require explicit CPU gold parity proofs or automated invariant markers.
+4. **UMA Memory Accounting:** Tracks true Unified Memory allocation using Mach kernel `task_vm_info.phys_footprint` (`core/memory/uma_tracker.h`), deprecating deceptive `resident_size`.
+5. **Dual E2E vs Compute Latency:** Simultaneously logs host wall-clock time (`commit` + wait) alongside hardware GPU counter delta (`GPUStartTime` / `GPUEndTime`).
+6. **Non-Finite Tripwire Assertions:** Scans output buffers for `NaN` and `Inf` with hard tripwires (`core/metrology/tripwires.h`) halting flawed executions immediately.
+7. **Planar 128-bit LSU Alignment:** Quantized planar layouts enforce `sizeof % 16 == 0` for direct coalesced vector loads without split-cache penalties.
+8. **Stride-36 SRAM Bank Conflict Padding:** Matrix tiles in threadgroup memory enforce `[64][36]` stride padding, eliminating 32-way shared memory bank stalls.
+9. **Masked Difference Prohibition:** Verification rejects masked diffs; calculations enforce dyadic absolute differences: $\text{diff} = |y_{\text{gpu}} - y_{\text{cpu}}|$.
+10. **Apples-to-Apples Calibration Standards:** Standardized to 20 measured iterations, 3 warmup runs, and mandatory boundary tokens $M \in \{33, 127, 128, 129, 2048\}$.
+11. **Cognitive Telemetry Units:** Metrics format values $\ge 1000\text{ ms}$ automatically to seconds (e.g. `12450 ms -> 12.450 s`).
 
 ---
 

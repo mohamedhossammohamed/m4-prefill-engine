@@ -1,4 +1,5 @@
 #pragma once
+
 #include <cstdint>
 #include <cstddef>
 
@@ -8,6 +9,8 @@
 #define QUANT_HALF __fp16
 #endif
 
+namespace core::memory {
+
 // ============================================================================
 // UNIVERSAL QUANTIZATION FORMAT IDENTIFIERS
 // ============================================================================
@@ -16,8 +19,10 @@ enum QuantFormat {
     QUANT_MLX_4BIT        = 1,  // MLX-style 32-element affine block (1 FP16 scale + 1 FP16 bias + 16 uint8 bytes = 20 bytes / block)
     QUANT_Q4_K            = 2,  // GGUF-style 256-element super-block (2 FP16 + 12 uint8 scales/mins + 128 uint8 qs = 144 bytes / super-block)
     QUANT_TERNARY_1_58    = 3,  // BitNet-style 32-element ternary block (1 FP16 scale + 2 uint32s = 12 bytes / block)
-    QUANT_VAR_RATE_AFFINE = 4,  // Grouped Variable-Rate Affine 256-element super-block (grouped scales/biases + 3/4/5-bit streams)
-    QUANT_EXL3            = 5   // ExLlamaV3 256-element vector codebook super-block (hierarchical centroids + residual corrections)
+    QUANT_VAR_RATE_AFFINE = 4,  // Grouped Variable-Rate Affine 256-element super-block (grouped scales/biases + 3/4/5-bit streams = 160 bytes)
+    QUANT_EXL3            = 5,  // ExLlamaV3 256-element vector codebook super-block (hierarchical centroids + residuals = 144 bytes)
+    QUANT_Q8_0            = 6,  // Standard 32-element 8-bit symmetric block (1 FP16 scale + 32 int8 bytes = 34 bytes / block)
+    QUANT_CUSTOM          = 99  // Extensible custom format identifier
 };
 
 enum LayoutMode {
@@ -36,10 +41,11 @@ struct block_q4_0 {
 };
 
 // 2. QUANT_MLX_4BIT: 32 weights per block (20 bytes = 5.00 bits/weight)
+// MLX 4-bit affine block with FP16 scale and FP16 bias
 struct block_mlx_4bit {
-    QUANT_HALF d;
-    QUANT_HALF bias;
-    uint8_t qs[16];
+    QUANT_HALF d;     // FP16 scale (2 bytes)
+    QUANT_HALF bias;  // FP16 bias (2 bytes)
+    uint8_t qs[16];   // 32 x 4-bit nibbles (16 bytes)
 };
 
 // 3. QUANT_Q4_K: 256 weights per super-block (144 bytes = 4.50 bits/weight)
@@ -58,19 +64,17 @@ struct block_ternary_1_58 {
 };
 
 // 5. QUANT_VAR_RATE_AFFINE: 256 weights per super-block (160 bytes = 5.00 bits/weight)
-// Multi-bit rate packing (3-bit, 4-bit, 5-bit sub-block streams) with grouped scale/bias & permutation metadata
 struct block_var_rate_affine {
     QUANT_HALF d;          // super-block global scale (2 bytes)
     QUANT_HALF bias;       // super-block global bias (2 bytes)
     uint8_t scales[8];     // 8 x sub-block scales (8 bytes)
     uint8_t biases[8];     // 8 x sub-block biases (8 bytes)
     uint8_t modes[8];      // 8 x sub-block mode & permutation metadata (8 bytes)
-    uint8_t _pad[4];       // alignment padding to 160 bytes (4 bytes)
+    uint8_t _pad[4];       // alignment padding to 32-byte header / 160 bytes total (4 bytes)
     uint8_t qs[128];       // Multi-bit packed quant payload stream (128 bytes)
 };
 
 // 6. QUANT_EXL3: 256 weights per super-block (144 bytes = 4.50 bits/weight)
-// Hierarchical vector codebook centroids/indices, FP16 global scale/bias, sub-block scale & residual metadata
 struct block_exl3 {
     QUANT_HALF d;          // super-block global scale (2 bytes)
     QUANT_HALF bias;       // super-block global bias (2 bytes)
@@ -79,6 +83,12 @@ struct block_exl3 {
     int8_t codebook[16];   // 16 x hierarchical vector codebook centroids (16 bytes)
     uint8_t _pad[12];      // alignment padding to 144 bytes (12 bytes)
     uint8_t qs[96];        // 256 x 3-bit packed index streams (96 bytes = 8 x 12 bytes)
+};
+
+// 7. QUANT_Q8_0: 32 weights per block (34 bytes = 8.50 bits/weight)
+struct block_q8_0 {
+    QUANT_HALF d;
+    int8_t qs[32];
 };
 
 // ============================================================================
@@ -107,8 +117,12 @@ inline QuantFormatInfo get_quant_info(QuantFormat fmt) {
             return {QUANT_VAR_RATE_AFFINE, "VAR_RATE_AFFINE", "Grouped Variable-Rate Affine 256-elem mixed 3/4/5-bit super-block", 256, sizeof(block_var_rate_affine), 5.00};
         case QUANT_EXL3:
             return {QUANT_EXL3, "EXL3", "ExLlamaV3 256-elem hierarchical vector codebook super-block with residual correction", 256, sizeof(block_exl3), 4.50};
+        case QUANT_Q8_0:
+            return {QUANT_Q8_0, "Q8_0", "Standard 32-elem 8-bit symmetric block (FP16 scale)", 32, sizeof(block_q8_0), 8.50};
+        case QUANT_CUSTOM:
+        default:
+            return {QUANT_CUSTOM, "CUSTOM", "Custom / dynamically registered format", 32, 0, 0.0};
     }
-    return {QUANT_Q4_0, "UNKNOWN", "Unknown format", 32, 0, 0.0};
 }
 
 inline size_t compute_quant_weight_bytes(QuantFormat fmt, size_t total_elements) {
@@ -116,3 +130,5 @@ inline size_t compute_quant_weight_bytes(QuantFormat fmt, size_t total_elements)
     size_t num_blocks = (total_elements + info.block_size - 1) / info.block_size;
     return num_blocks * info.block_bytes;
 }
+
+} // namespace core::memory

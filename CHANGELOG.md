@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
+## [0.2.3] - 2026-09-03 - More Flexibility, Smaller Legos
+
+### Summary
+Version 0.2.3 modularizes the Metal quantization and inference pipeline into composable, isolated components without altering runtime numerical behavior or hardware execution paths. Format-specific dequantization logic for 6 codecs is isolated into per-codec MSL headers under `include/metal/quant/`, feeding unified templated `TCodec` operator cores for BlockMMA GEMM, Dual-SIMD SwiGLU, and FlashAttention in `include/metal/ops/`. A host-side dynamic `QuantRegistry` enables Open-Closed format addition without touching core matrix multiplication kernels. All refactored kernels are validated bit-exact against monolithic baselines across 30 configurations (6 codecs $\times$ 5 boundary token counts), backed by a 204-test automated verification suite (`make test`).
+
+### Added
+* **Modular Codec Headers (`include/metal/quant/`):**
+  * Extracted 6 quantization codec unpackers (`q4_0.metal`, `mlx_4bit.metal`, `q4_k.metal`, `ternary_1_58.metal`, `var_rate_affine.metal`, `exl3.metal`) behind a uniform `TCodec::unpack_column` interface contract (`codec_traits.metal`).
+* **Templated Operator Cores (`include/metal/ops/`):**
+  * `block_mma_64x64_gemm_core<TCodec, DIRECT>` (`gemm_mma.metal`): Unified 2D AMX tensor core matrix multiplication engine shared across all quantization formats.
+  * `swiglu_mma_dual_simd_core<TCodec>` (`swiglu_dual_simd.metal`): Cooperative dual-SIMD Gate/Up projection and SiLU activation engine.
+  * `flash_attn_mma_64x64_fp16_core<D>` (`flash_attention.metal`): Templated barrier-free online softmax FlashAttention core ($D \in \{64, 128\}$).
+  * Runtime recursive MSL `#include` and `#pragma once` preprocessor (`core/metal/shader_loader.mm`).
+* **Dynamic Codec Registry (`src/router/quant_registry.h`):**
+  * Declarative `QuantRegistry` and `REGISTER_QUANT_CODEC` macro enabling runtime discovery and dispatch across all 7 formats plus custom runtime formats (`QUANT_CUSTOM`).
+* **Bit-Exact Pre/Post Parity Suite (`tests/test_kernel_parity.mm`):**
+  * Automated side-by-side GPU execution verifying bit-for-bit output identity (`diff == 0.000000`) between modular headers and monolithic kernels across 30 configurations ($M \in \{33, 127, 128, 129, 512\}$).
+* **Composable Transformer Layer Coordinator (`models/transformer_layer.h`):**
+  * Modular coordinator binding RMSNorm, QKV GEMM, FlashAttention, Residual Adds, and SwiGLU forward passes into unified command buffers with GPU verification (`tests/test_transformer_layer.mm`).
+* **Metrological Invariants Suite (`core/`):**
+  * Authoritative implementations of 16KB Direct I/O memory alignment (`core/memory/page_allocator.mm`), Mach kernel `phys_footprint` tracking with zero-leak verification (`core/memory/uma_tracker.mm`), 32MB SLC cache flushing (`core/memory/cache_flush.mm`), non-finite tripwires (`core/metrology/tripwires.mm`), and cognitive telemetry formatting (`core/metrology/telemetry_format.mm`).
+* **Automated Verification Harness (`make test`):**
+  * 204 test cases across 6 test binaries verifying core invariants (108 tests), Metal header compilation and static register capacity (10 tests), QuantRegistry full 7-format coverage (5 tests), pre/post refactor bit-exact kernel parity across all formats and boundary token counts (30 tests), composable transformer layer coordinator (1 test), and E2E feature coverage for $M \in \{33, 127, 128, 129, 2048\}$ (50 tests). Zero memory leaks.
+
+---
+
 ## [0.2.1] - 2026-09-03 - Beyond MLX Prefill Speeds
 
 ### Summary

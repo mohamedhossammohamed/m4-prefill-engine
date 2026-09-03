@@ -3,7 +3,7 @@
 
 > **Live Documentation:** [mohamedhossammohamed.github.io/m4-prefill-engine](https://mohamedhossammohamed.github.io/m4-prefill-engine/)  
 > **Hardware Target:** Apple M4 MacBook Air (10-core GPU, 16GB Unified Memory)  
-> **Version:** v0.2.1 ("Beyond MLX Prefill Speeds")
+> **Version:** v0.2.3 ("More Flexibility, Smaller Legos")
 
 ---
 
@@ -165,6 +165,9 @@ git clone https://github.com/mohamedhossammohamed/m4-prefill-engine.git
 cd m4-prefill-engine
 make clean && make
 
+# 0. Run automated metrology & invariant test suite (204 tests across 6 test binaries)
+make test
+
 # 1. Hardware calibration & baseline
 ./bench_m4
 
@@ -186,6 +189,81 @@ make clean && make
 # 7. 60-second thermal stress test
 ./thermal_stress_test
 ```
+
+---
+
+## 🧩 Modular Architecture & Extensibility (v0.2.3)
+
+To facilitate community experimentation and eliminate the risk of breaking core kernels, the engine features a fully decoupled, header-only architecture:
+
+```
+m4-prefill-engine/
+├── core/
+│   ├── memory/          # 16KB Direct I/O page allocators, UMA phys_footprint tracker, SLC cache purge
+│   ├── metrology/       # PRNG, non-finite (NaN/Inf) tripwires, timing & cognitive telemetry
+│   └── metal/           # MSL shader preprocessor and library loader
+├── include/metal/
+│   ├── common/          # LSU vector loaders, butterfly reductions (simd_reduce.metal), sram_tile.metal
+│   ├── quant/           # Quantization codec traits & unpackers (q4_0, mlx, q4_k, exl3, ternary, affine)
+│   └── ops/             # Decoupled BlockMMA GEMM, Dual-SIMD SwiGLU, and FlashAttention cores
+├── src/router/          # Host-side dynamic format registry (QuantRegistry)
+├── models/              # Composable TransformerLayerCoordinator
+└── tests/               # 204-test suite: core invariants, metal headers, registry, kernel parity, transformer, E2E coverage
+```
+
+### Adding a New Quantization Format in ≤ 20 Lines
+
+Contributors can introduce experimental quantization formats without touching any GEMM or attention kernels:
+
+#### 1. Implement the MSL Codec Unpacker (`include/metal/quant/my_codec.metal`)
+```metal
+#pragma once
+#include <metal_stdlib>
+using namespace metal;
+#include "codec_traits.metal"
+
+namespace metal_llm {
+namespace quant {
+
+struct block_my_codec {
+    half d;
+    uint8_t qs[16];
+};
+
+struct CodecMyFormat {
+    using BlockType = block_my_codec;
+    enum { BLOCK_SIZE = 32, SUPER_BLOCK_SIZE = 32 };
+
+    static inline void unpack_column(
+        device const block_my_codec* B,
+        uint col, uint kb, uint K,
+        threadgroup half* sh_B, uint linear_tid)
+    {
+        // Vector unpack 32 weights into sh_B[0..31][linear_tid]
+    }
+};
+
+} // namespace quant
+} // namespace metal_llm
+```
+
+#### 2. Register with Host Dynamic Registry
+```cpp
+REGISTER_QUANT_CODEC((metal_llm::QuantCodecDescriptor{
+    core::memory::QUANT_CUSTOM,
+    "MY_FORMAT",
+    "Custom format description",
+    32,
+    sizeof(block_my_codec),
+    4.50,
+    "quant_gemm_my_format",
+    "quant_head_gemm_my_format",
+    nullptr,
+    nullptr
+}));
+```
+
+The unified 2D `block_mma_64x64_gemm_core<TCodec>` will automatically instantiate hardware AMX tensor acceleration for your format with up to 1024 threads/threadgroup compiler static capacity limit.
 
 ---
 

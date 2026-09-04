@@ -32,7 +32,9 @@ struct MetalFixture {
                 "quant_router_gemm_var_rate_affine_64x64",
                 "quant_router_head_gemm_var_rate_affine_64x64",
                 "quant_router_gemm_exl3_64x64",
-                "quant_router_head_gemm_exl3_64x64"
+                "quant_router_head_gemm_exl3_64x64",
+                "quant_router_gemm_prism_q2_0_64x64",
+                "quant_router_head_gemm_prism_q2_0_64x64"
             };
 
             for (const auto& name : kernel_names) {
@@ -453,6 +455,34 @@ TEST_CASE(test_tier1_format_exl3_cpu_vector_lsu_alignment) {
     ASSERT_EQ(get_quant_info(QUANT_EXL3).block_size, 256);
 }
 
+// 2.7 PrismML Q2_0 Tests
+TEST_CASE(test_tier1_format_prism_q2_0_standard_gemm) {
+    run_format_tests<block_prism_q2_0>(ctx, QUANT_PRISM_Q2_0, "quant_router_gemm_prism_q2_0_64x64", "quant_router_head_gemm_prism_q2_0_64x64",
+                                       generate_prism_q2_0_weights, cpu_gold_reference_prism_q2_0, 128);
+}
+TEST_CASE(test_tier1_format_prism_q2_0_direct_head) {
+    const uint32_t M = 64, K = 256, H = 2, D = 64, N = 128;
+    id<MTLBuffer> bufA = [g_fixture.device newBufferWithLength:M * K * 2 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> bufB = [g_fixture.device newBufferWithLength:compute_quant_weight_bytes(QUANT_PRISM_Q2_0, N * K) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> bufC = [g_fixture.device newBufferWithLength:M * N * 2 options:MTLResourceStorageModeShared];
+    generate_activations((__fp16*)[bufA contents], M * K);
+    generate_prism_q2_0_weights((block_prism_q2_0*)[bufB contents], N * (K / 128));
+    g_fixture.run_head_gemm("quant_router_head_gemm_prism_q2_0_64x64", bufA, bufB, bufC, M, H, D, K);
+    std::vector<__fp16> cpu(M * N);
+    cpu_gold_reference_prism_q2_0((const __fp16*)[bufA contents], (const block_prism_q2_0*)[bufB contents], cpu.data(), M, N, K, true, H, D);
+    ASSERT_LE(compute_max_diff((const __fp16*)[bufC contents], cpu.data(), M * N), 0.0078125f);
+}
+TEST_CASE(test_tier1_format_prism_q2_0_cpu_scale_reconstruction) {
+    block_prism_q2_0 blk;
+    blk.d = (__fp16)0.025f;
+    std::memset(blk.qs, 0x55, 32); // 0b01010101 = all 1s -> 1 - 1 = 0
+    ASSERT_NEAR((float)blk.d, 0.025f, 1e-4f);
+}
+TEST_CASE(test_tier1_format_prism_q2_0_cpu_vector_lsu_alignment) {
+    ASSERT_EQ(sizeof(block_prism_q2_0), 34);
+    ASSERT_EQ(get_quant_info(QUANT_PRISM_Q2_0).block_size, 128);
+}
+
 // ============================================================================
 // FEATURE 3: Non-Finite Tripwires (5 Tests)
 // ============================================================================
@@ -663,9 +693,11 @@ int main(int argc, const char* argv[]) {
     RUN_TEST(test_tier1_format_var_rate_affine_direct_head);
     RUN_TEST(test_tier1_format_exl3_standard_gemm);
     RUN_TEST(test_tier1_format_exl3_direct_head);
+    RUN_TEST(test_tier1_format_prism_q2_0_standard_gemm);
+    RUN_TEST(test_tier1_format_prism_q2_0_direct_head);
 
-    // Feature 2B: 6 Quantization Formats CPU Layout & Unpacking Unit Tests (18 CPU tests)
-    std::cout << "\n" << COLOR_YELLOW << "[Feature 2B: Quantization Formats - CPU Unit & Layout Tests (18 Tests)]" << COLOR_RESET << std::endl;
+    // Feature 2B: Quantization Formats CPU Layout & Unpacking Unit Tests
+    std::cout << "\n" << COLOR_YELLOW << "[Feature 2B: Quantization Formats - CPU Unit & Layout Tests]" << COLOR_RESET << std::endl;
     RUN_TEST(test_tier1_format_q4_0_cpu_scale_reconstruction);
     RUN_TEST(test_tier1_format_q4_0_cpu_zero_offset);
     RUN_TEST(test_tier1_format_q4_0_cpu_vector_lsu_alignment);
@@ -689,6 +721,9 @@ int main(int argc, const char* argv[]) {
     RUN_TEST(test_tier1_format_exl3_cpu_scale_reconstruction);
     RUN_TEST(test_tier1_format_exl3_cpu_codebook_centroids);
     RUN_TEST(test_tier1_format_exl3_cpu_vector_lsu_alignment);
+
+    RUN_TEST(test_tier1_format_prism_q2_0_cpu_scale_reconstruction);
+    RUN_TEST(test_tier1_format_prism_q2_0_cpu_vector_lsu_alignment);
 
     // Feature 3: Non-Finite Tripwires (5 tests)
     std::cout << "\n" << COLOR_YELLOW << "[Feature 3: Non-Finite Tripwires]" << COLOR_RESET << std::endl;

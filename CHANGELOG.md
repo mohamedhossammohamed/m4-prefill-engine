@@ -6,6 +6,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
+## [0.3.0] - 2026-09-04 - Warming the Tires
+
+### Summary
+Version 0.3.0 transitions `m4-prefill-engine` from a standalone prefill micro-architecture into a complete, modular, end-to-end inference engine capable of prompt prefill ($M \ge 1$) and autoregressive token generation ($M = 1$) on Apple Silicon. A zero-copy Metal Unified Memory Architecture (UMA) bridge allows MLX tensors to be consumed directly by custom Metal shaders without memory copies. The transformer stack is fully decoupled into swappable building blocks (`src/engine/`) supporting arbitrary model topologies (including Gemma 2 configurations). The quantization catalog expands to 8 formats with the addition of the PrismML Q2_0 128-weight ternary codec and a native endian-safe GGUF loader. Automated comparative benchmarks evaluate custom hardware execution head-to-head against stock MLX baselines.
+
+### Added
+* **Zero-Copy Metal UMA C-ABI & Python Bridge (`core/bridge/`):**
+  * Dynamic library `libm4_bridge.dylib` providing zero-copy buffer sharing between MLX arrays and Metal device memory via `newBufferWithBytesNoCopy`.
+  * Python interface `MetalUMABridge` with buffer lifetime tracking, automated contiguous memory alignment, and non-finite (NaN/Inf) tripwires.
+  * Hardware-accurate physical memory tracking using Mach kernel `task_vm_info.phys_footprint`.
+* **Decoupled Unified Inference Engine (`src/engine/`):**
+  * `M4QuantizedLinear`: Quantized linear layer supporting dynamic dispatch between GEMV ($M=1$) and GEMM ($M > 1$) across all supported codecs with support for arbitrary leading batch dimensions.
+  * `M4KVCache`: Dual-mode KV cache supporting pre-allocated circular DRAM buffers (`in_ram`) or Direct I/O NVMe flash streaming (`out_of_core`) with `F_NOCACHE` and zero disk litter.
+  * `TransformerBlock` & `TransformerModel`: Composable architecture supporting Grouped-Query Attention (GQA), causal masking, RoPE sequence offset alignment, SwiGLU / GeGLU activations, and Gemma 2 `gemma_add_one` RMSNorm.
+  * `InferenceEngine`: High-level runtime managing prompt prefill, token decode loops, greedy argmax / temperature / top-p sampling, and early EOS termination.
+* **PrismML Q2_0 Ternary Codec (`QUANT_PRISM_Q2_0`):**
+  * 128-weight ternary quantization block (`block_prism_q2_0`, 34 bytes per block, 2.125 bpw) using 2-byte FP16 scale and 32 bytes packed 2-bit codes.
+  * Modular MSL unpacker in `include/metal/quant/prism_q2_0.metal` consuming the central `block_mma_64x64_gemm_core` with zero modifications to shared dispatch code.
+  * Spec-compliant dequantization $w = (q - 1) \times d$, mapping reserved code $q=3$ strictly to $+2 \times d$.
+* **Native Endian-Safe GGUF File Loader (`core/weights/`):**
+  * Zero-copy `mmap` binary parser validating GGUF v2/v3 magic and headers, metadata KV table, tensor-info table, and alignment padding.
+  * Endian-safe extraction of Q2_0 tensor weights directly into `block_prism_q2_0` structures.
+* **Automated Comparative Benchmark Harness (`benchmarks/`):**
+  * CLI tool `bench_m4_vs_mlx.py` evaluating custom M4 hardware pipelines against stock MLX baselines across Time to First Token (TTFT), prefill throughput, decode latency, decode throughput, and active UMA footprint.
+  * 32MB direct I/O cache purge (`purge_cold_caches`) preventing SLC and buffer cache contamination.
+  * Pipelined asynchronous command-buffer encoding eliminating per-projection CPU wait bubbles.
+* **Quantization Registry Extension:**
+  * Extended `QuantRegistry` to 8 built-in formats (`Q4_0`, `MLX_4BIT`, `Q4_K`, `TERNARY_1_58`, `VAR_RATE_AFFINE`, `EXL3`, `Q8_0`, `PRISM_Q2_0`).
+
+### Verification & Test Coverage
+* **Native C++ Test Suite (`make test`):**
+  * 7 test targets passing cleanly under `clang++ -O3 -Wall` with zero warnings.
+  * Bit-exact parity verified across 35 configurations (7 codecs $\times$ 5 token boundaries, `diff == 0.000000`).
+  * 54/54 E2E tier-1 feature tests passed.
+  * 8/8 GGUF loader integrity tests passed.
+* **Python Engine & Red-Team Suites:**
+  * 42 verification probes across bridge, module, orchestrator, and benchmark harnesses passing with zero detected defects.
+
+---
+
 ## [0.2.3] - 2026-09-03 - More Flexibility, Smaller Legos
 
 ### Summary

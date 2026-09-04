@@ -217,6 +217,16 @@ int main() {
         }
     }
 
+    // 7. PRISM_Q2_0
+    for (uint32_t M : {33, 127, 128, 129, 512}) {
+        total++;
+        std::cout << "  RUN Parity [PRISM_Q2_0] M=" << M << "... ";
+        if (verify_kernel_parity<block_prism_q2_0>(h, QUANT_PRISM_Q2_0, "quant_router_gemm_prism_q2_0_64x64", "test_modular_prism_q2_0_gemm", generate_prism_q2_0_weights, 128, M, N, K)) {
+            std::cout << "BIT-EXACT (diff=0.000000)" << std::endl;
+            passed++;
+        }
+    }
+
     std::cout << "=================================================================" << std::endl;
     std::cout << " SUMMARY: Pre/Post Refactor Parity" << std::endl;
     std::cout << "  Total Configurations: " << total << std::endl;

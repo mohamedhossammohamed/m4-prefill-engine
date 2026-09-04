@@ -17,7 +17,9 @@ enum QuantFormat {
     QUANT_Q4_K            = 2,  // GGUF-style 256-element super-block (2 FP16 + 12 uint8 scales/mins + 128 uint8 qs = 144 bytes / super-block)
     QUANT_TERNARY_1_58    = 3,  // BitNet-style 32-element ternary block (1 FP16 scale + 2 uint32s = 12 bytes / block)
     QUANT_VAR_RATE_AFFINE = 4,  // Grouped Variable-Rate Affine 256-element super-block (grouped scales/biases + 3/4/5-bit streams)
-    QUANT_EXL3            = 5   // ExLlamaV3 256-element vector codebook super-block (hierarchical centroids + residual corrections)
+    QUANT_EXL3            = 5,  // ExLlamaV3 256-element vector codebook super-block (hierarchical centroids + residual corrections)
+    QUANT_Q8_0            = 6,  // Standard 32-element 8-bit symmetric block (1 FP16 scale + 32 int8 bytes = 34 bytes / block)
+    QUANT_PRISM_Q2_0      = 7   // PrismML 128-element ternary block (1 FP16 scale + 32 packed 2-bit bytes = 34 bytes / block, 2.125 bpw)
 };
 
 enum LayoutMode {
@@ -81,6 +83,18 @@ struct block_exl3 {
     uint8_t qs[96];        // 256 x 3-bit packed index streams (96 bytes = 8 x 12 bytes)
 };
 
+// 7. QUANT_Q8_0: 32 weights per block (34 bytes = 8.50 bits/weight)
+struct block_q8_0 {
+    QUANT_HALF d;          // FP16 scale (2 bytes)
+    int8_t qs[32];         // 32 x int8 weights (32 bytes)
+};
+
+// 8. QUANT_PRISM_Q2_0: 128 weights per block (34 bytes = 2.125 bits/weight)
+struct block_prism_q2_0 {
+    QUANT_HALF d;          // FP16 scale (2 bytes)
+    uint8_t qs[32];        // 128 x 2-bit codes, 4 codes per byte, LSB-first (32 bytes)
+};
+
 // ============================================================================
 // FORMAT METADATA & HELPER UTILITIES
 // ============================================================================
@@ -107,6 +121,10 @@ inline QuantFormatInfo get_quant_info(QuantFormat fmt) {
             return {QUANT_VAR_RATE_AFFINE, "VAR_RATE_AFFINE", "Grouped Variable-Rate Affine 256-elem mixed 3/4/5-bit super-block", 256, sizeof(block_var_rate_affine), 5.00};
         case QUANT_EXL3:
             return {QUANT_EXL3, "EXL3", "ExLlamaV3 256-elem hierarchical vector codebook super-block with residual correction", 256, sizeof(block_exl3), 4.50};
+        case QUANT_Q8_0:
+            return {QUANT_Q8_0, "Q8_0", "Standard 32-elem 8-bit symmetric block (FP16 scale)", 32, sizeof(block_q8_0), 8.50};
+        case QUANT_PRISM_Q2_0:
+            return {QUANT_PRISM_Q2_0, "PRISM_Q2_0", "PrismML Q2_0 128-elem ternary {-1, 0, +1} block (FP16 scale)", 128, sizeof(block_prism_q2_0), 2.125};
     }
     return {QUANT_Q4_0, "UNKNOWN", "Unknown format", 32, 0, 0.0};
 }

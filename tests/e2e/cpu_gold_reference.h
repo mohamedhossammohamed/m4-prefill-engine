@@ -398,6 +398,47 @@ inline void cpu_gold_reference_exl3(
     });
 }
 
+// 6b. PRISM_Q2_0 CPU Gold Reference
+inline void cpu_gold_reference_prism_q2_0(
+    const __fp16* A,
+    const block_prism_q2_0* B,
+    __fp16* C,
+    uint32_t M,
+    uint32_t N,
+    uint32_t K,
+    bool direct_head = false,
+    uint32_t H = 0,
+    uint32_t D = 0)
+{
+    uint32_t nb = K / 128;
+    dispatch_apply(M, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^(size_t m) {
+        for (uint32_t n = 0; n < N; n++) {
+            const block_prism_q2_0* b_col = B + (size_t)n * nb;
+            const __fp16* a_row = A + (size_t)m * K;
+            double acc = 0.0;
+            for (uint32_t b = 0; b < nb; b++) {
+                double d = (double)b_col[b].d;
+                uint32_t a_off = b * 128;
+                for (int byte_idx = 0; byte_idx < 32; byte_idx++) {
+                    uint8_t byte_val = b_col[b].qs[byte_idx];
+                    for (int j = 0; j < 4; j++) {
+                        int code = (int)((byte_val >> (j * 2)) & 0x3) - 1;
+                        double w = (double)code * d;
+                        acc += (double)a_row[a_off + byte_idx * 4 + j] * w;
+                    }
+                }
+            }
+            if (direct_head && H > 0 && D > 0) {
+                uint32_t h = n / D;
+                uint32_t d_idx = n % D;
+                C[(h * M + m) * D + d_idx] = (__fp16)acc;
+            } else {
+                C[m * N + n] = (__fp16)acc;
+            }
+        }
+    });
+}
+
 // 7. Causal Attention CPU Gold Reference
 inline void cpu_gold_reference_attention(
     const __fp16* Q, // [H, M, D]

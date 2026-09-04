@@ -26,20 +26,20 @@ All cross-engine numbers use synthetic in-UMA weights with exact model shapes, n
     +---------------------------+----------------------------------------------------+-----------------------+----------------------------------------------------+
     | Pipeline Stage            | llama.cpp-style baseline (in-house Metal ggml)     | Unified Opt (FP16 KV) | Unified Opt (Q8_0 KV) [custom-only feature]        |
     +---------------------------+----------------------------------------------------+-----------------------+----------------------------------------------------+
-    | 1. QKV Projections        |                                26.87 [26.87-64.16] |   26.87 [20.57-34.07] |                                26.87 [21.05-27.07] |
-    | 2. Causal Attention       |                               34.20 [34.20-172.14] |   34.20 [26.85-38.65] |                                34.20 [29.12-39.51] |
-    | 3. Output Proj & Residual |                                  8.60 [8.60-22.51] |      8.60 [7.60-9.80] |                                  8.60 [6.83-10.64] |
-    | 4. MLP SwiGLU Stage       |                               90.85 [90.85-203.79] |  90.85 [68.03-104.90] |                               90.85 [67.76-104.94] |
+    | 1. QKV Projections        |                                24.98 [24.98-56.75] |   24.98 [23.30-24.98] |                                24.98 [21.89-25.15] |
+    | 2. Causal Attention       |                               36.42 [36.42-138.84] |   36.42 [29.38-36.42] |                                36.42 [29.35-37.00] |
+    | 3. Output Proj & Residual |                                  9.29 [9.29-18.42] |     9.29 [8.08-10.31] |                                  9.29 [7.74-11.56] |
+    | 4. MLP SwiGLU Stage       |                               87.32 [87.32-142.92] |   87.32 [72.90-87.32] |                                87.32 [76.04-89.07] |
     +---------------------------+----------------------------------------------------+-----------------------+----------------------------------------------------+
-    | TOTAL 1-LAYER (Wall-Clock)|                             269.49 [260.56-386.21] | 116.93 [109.03-218.79] |                             118.95 [112.40-175.78] |
-    | TOTAL 1-LAYER (GPU-only)  |                             268.19 [260.11-384.83] | 116.53 [108.49-217.50] |                             118.54 [112.01-175.29] |
+    | TOTAL 1-LAYER (Wall-Clock)|                             318.71 [285.94-363.22] | 139.13 [124.80-164.99] |                             148.99 [127.51-163.16] |
+    | TOTAL 1-LAYER (GPU-only)  |                             318.21 [285.65-362.81] | 138.72 [124.29-164.46] |                             148.60 [127.16-162.80] |
     +---------------------------+----------------------------------------------------+-----------------------+----------------------------------------------------+
 
 [3] THROUGHPUT & SYSTEM METRICS (Shared Timing Method: Wall-Clock around commit+waitUntilCompleted):
-    - 1-Layer Latency (Wall-Clock):  Baseline=269.49 ms [260.56-386.21] | Opt FP16=116.93 ms [109.03-218.79] (2.30x) | Opt Q8=118.95 ms [112.40-175.78] (2.27x)
-    - 1-Layer Latency (GPU-only):    Opt FP16 (GPU-only ours)=116.53 ms [108.49-217.50] | Opt Q8 (GPU-only ours)=118.54 ms [112.01-175.29]
-    - 1-Layer Throughput:            Baseline=7596 tok/s | Opt FP16=17506 tok/s | Opt Q8=17209 tok/s
-    - Full-Model Estimate (16L): Baseline=4.31 s | Opt FP16=1.87 s | Opt Q8=1.90 s
-    - Full-Model Estimate Throughput:Baseline=475 tok/s | Opt FP16=1094 tok/s | Opt Q8=1076 tok/s
+    - 1-Layer Latency (Wall-Clock):  Baseline=318.71 ms [285.94-363.22] | Opt FP16=139.13 ms [124.80-164.99] (2.29x) | Opt Q8=148.99 ms [127.51-163.16] (2.14x)
+    - 1-Layer Latency (GPU-only):    Opt FP16 (GPU-only ours)=138.72 ms [124.29-164.46] | Opt Q8 (GPU-only ours)=148.60 ms [127.16-162.80]
+    - 1-Layer Throughput:            Baseline=6423 tok/s | Opt FP16=14713 tok/s | Opt Q8=13739 tok/s
+    - Full-Model Estimate (16L): Baseline=5.10 s | Opt FP16=2.23 s | Opt Q8=2.38 s
+    - Full-Model Estimate Throughput:Baseline=401 tok/s | Opt FP16=920 tok/s | Opt Q8=859 tok/s
     - Effective DRAM Bandwidth:      0.2 GB/s (0.2% of 120 GB/s peak)
     - Note on Q8_0 KV:               custom-only feature (MLX path runs FP16 KV); not part of the cross-engine comparison.

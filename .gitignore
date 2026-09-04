@@ -26,6 +26,17 @@ simd_matrix_bench
 .tmp*
 /tmp/
 
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Tooling & Scratch
+graphify-out/
+.agents/
+ORIGINAL_REQUEST.md
+
 # Agent Knowledge & Internal Protocols (Excluded from Git tracking)
 agents/
+
 

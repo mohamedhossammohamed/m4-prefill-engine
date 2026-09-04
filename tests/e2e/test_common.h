@@ -412,6 +412,20 @@ inline void generate_exl3_weights(block_exl3* blocks, size_t num_superblocks) {
     }
 }
 
+inline void generate_prism_q2_0_weights(block_prism_q2_0* blocks, size_t num_blocks) {
+    for (size_t b = 0; b < num_blocks; b++) {
+        blocks[b].d = (__fp16)(prng_rand_uniform(0.01f, 0.05f));
+        for (int i = 0; i < 32; i++) {
+            uint8_t val = 0;
+            for (int j = 0; j < 4; j++) {
+                uint8_t choice = (uint8_t)(prng_next_u32() % 4);
+                val |= (choice << (j * 2));
+            }
+            blocks[b].qs[i] = val;
+        }
+    }
+}
+
 // ============================================================================
 // Shader Path Resolver & Pipeline Helper
 // ============================================================================

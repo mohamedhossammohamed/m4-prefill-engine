@@ -155,6 +155,20 @@ void QuantRegistry::register_builtin_codecs() {
         nullptr,
         nullptr
     });
+
+    // 8. QUANT_PRISM_Q2_0
+    register_codec({
+        QUANT_PRISM_Q2_0,
+        "PRISM_Q2_0",
+        "PrismML Q2_0 128-elem ternary {-1, 0, +1} block (FP16 scale)",
+        128,
+        sizeof(block_prism_q2_0),
+        2.125,
+        "quant_router_gemm_prism_q2_0_64x64",
+        "quant_router_head_gemm_prism_q2_0_64x64",
+        nullptr,
+        nullptr
+    });
 }
 
 } // namespace metal_llm

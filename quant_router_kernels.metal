@@ -57,6 +57,11 @@ struct block_exl3 {
     uint8_t qs[96];      // 256 x 3-bit packed index streams (96 bytes = 8 x 12 bytes)
 };
 
+struct block_prism_q2_0 {
+    half d;              // FP16 scale (2 bytes)
+    uint8_t qs[32];      // 128 x 2-bit codes, 4 codes per byte, LSB-first (32 bytes)
+};
+
 inline uint read_u32_unaligned(thread const uint8_t* p) {
     return (uint)p[0] | ((uint)p[1] << 8) | ((uint)p[2] << 16) | ((uint)p[3] << 24);
 }
@@ -405,6 +410,31 @@ inline void unpack_exl3_subblock(
     }
 }
 
+// 3.7 Unpack PrismML Q2_0 sub-block (32 weights within 128-weight block) into sh_B[32][64]
+inline void unpack_prism_q2_0_subblock(
+    thread const block_prism_q2_0& blk,
+    uint sub_idx, // 0..3
+    threadgroup half* sh_B,
+    uint linear_tid)
+{
+    half d = blk.d;
+    uint qs_offset = sub_idx * 8;
+    thread const uint8_t* p = blk.qs + qs_offset;
+    uint32_t q0 = read_u32_unaligned(p + 0);
+    uint32_t q1 = read_u32_unaligned(p + 4);
+
+    #pragma unroll
+    for (int j = 0; j < 16; j++) {
+        int c0 = (int)((q0 >> (j * 2)) & 0x3) - 1;
+        sh_B[j * 64 + linear_tid] = (half)((float)c0 * (float)d);
+    }
+    #pragma unroll
+    for (int j = 0; j < 16; j++) {
+        int c1 = (int)((q1 >> (j * 2)) & 0x3) - 1;
+        sh_B[(16 + j) * 64 + linear_tid] = (half)((float)c1 * (float)d);
+    }
+}
+
 // ============================================================================
 // 4. UNIFIED 2D BLOCKMMA ENGINE CORE (64x64 Tile, 4 SIMDgroups, FP32 Precision)
 // ============================================================================
@@ -692,6 +722,30 @@ kernel void quant_router_gemm_exl3_64x64(
     block_mma_64x64_engine<false>(A, B, C, M, N, K, 0, 0, shmem, tg_id, simd_lane_id, simd_group_id, unpack_fn);
 }
 
+// 5.7 QUANT_PRISM_Q2_0 Standard GEMM
+kernel void quant_router_gemm_prism_q2_0_64x64(
+    device const half*                    A [[buffer(0)]],
+    device const block_prism_q2_0*        B [[buffer(1)]],
+    device half*                          C [[buffer(2)]],
+    constant uint&                        M [[buffer(3)]],
+    constant uint&                        N [[buffer(4)]],
+    constant uint&                        K [[buffer(5)]],
+    threadgroup half*                     shmem [[threadgroup(0)]],
+    uint2 tg_id   [[threadgroup_position_in_grid]],
+    uint  simd_lane_id [[thread_index_in_simdgroup]],
+    uint  simd_group_id [[simdgroup_index_in_threadgroup]])
+{
+    auto unpack_fn = [](device const block_prism_q2_0* b_ptr, uint col, uint kb, uint k_dim, threadgroup half* sh_B, uint tid) {
+        uint n_blocks = k_dim / 128;
+        uint blk_idx = kb / 4;
+        uint sub_idx = kb % 4;
+        block_prism_q2_0 blk = b_ptr[col * n_blocks + blk_idx];
+        unpack_prism_q2_0_subblock(blk, sub_idx, sh_B, tid);
+    };
+
+    block_mma_64x64_engine<false>(A, B, C, M, N, K, 0, 0, shmem, tg_id, simd_lane_id, simd_group_id, unpack_fn);
+}
+
 // ============================================================================
 // 6. DIRECT-HEAD ROUTING GEMM ENTRY POINTS FOR ALL QUANTIZATION FORMATS
 // ============================================================================
@@ -841,6 +895,32 @@ kernel void quant_router_head_gemm_exl3_64x64(
         uint sub_idx = kb % 8;
         block_exl3 blk = b_ptr[col * n_super + sb_idx];
         unpack_exl3_subblock(blk, sub_idx, sh_B, tid);
+    };
+
+    block_mma_64x64_engine<true>(A, B, C, M, N, K, H, D, shmem, tg_id, simd_lane_id, simd_group_id, unpack_fn);
+}
+
+// 6.7 QUANT_PRISM_Q2_0 Direct-Head GEMM
+kernel void quant_router_head_gemm_prism_q2_0_64x64(
+    device const half*                    A [[buffer(0)]],
+    device const block_prism_q2_0*        B [[buffer(1)]],
+    device half*                          C [[buffer(2)]],
+    constant uint&                        M [[buffer(3)]],
+    constant uint&                        H [[buffer(4)]],
+    constant uint&                        D [[buffer(5)]],
+    constant uint&                        K [[buffer(6)]],
+    threadgroup half*                     shmem [[threadgroup(0)]],
+    uint2 tg_id   [[threadgroup_position_in_grid]],
+    uint  simd_lane_id [[thread_index_in_simdgroup]],
+    uint  simd_group_id [[simdgroup_index_in_threadgroup]])
+{
+    uint N = H * D;
+    auto unpack_fn = [](device const block_prism_q2_0* b_ptr, uint col, uint kb, uint k_dim, threadgroup half* sh_B, uint tid) {
+        uint n_blocks = k_dim / 128;
+        uint blk_idx = kb / 4;
+        uint sub_idx = kb % 4;
+        block_prism_q2_0 blk = b_ptr[col * n_blocks + blk_idx];
+        unpack_prism_q2_0_subblock(blk, sub_idx, sh_B, tid);
     };
 
     block_mma_64x64_engine<true>(A, B, C, M, N, K, H, D, shmem, tg_id, simd_lane_id, simd_group_id, unpack_fn);

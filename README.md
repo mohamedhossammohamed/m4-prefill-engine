@@ -3,7 +3,7 @@
 
 > **Live Documentation:** [mohamedhossammohamed.github.io/m4-prefill-engine](https://mohamedhossammohamed.github.io/m4-prefill-engine/)  
 > **Hardware Target:** Apple M4 MacBook Air (10-core GPU, 16GB Unified Memory)  
-> **Version:** v0.2.3 ("More Flexibility, Smaller Legos")
+> **Version:** v0.3.0 ("Warming the tires")
 
 ---
 
@@ -264,6 +264,36 @@ REGISTER_QUANT_CODEC((metal_llm::QuantCodecDescriptor{
 ```
 
 The unified 2D `block_mma_64x64_gemm_core<TCodec>` will automatically instantiate hardware AMX tensor acceleration for your format with up to 1024 threads/threadgroup compiler static capacity limit.
+
+---
+
+## What's New in v0.3.0: "Warming the Tires"
+
+Version 0.3.0 delivers a complete, modular end-to-end inference stack and comparative harness:
+
+1. **Zero-Copy Metal UMA Bridge (`core/bridge/`):**
+   * Dynamic C-ABI library (`libm4_bridge.dylib`) and Python `MetalUMABridge` wrapper.
+   * Maps MLX `mx.array` Unified Memory pointers directly to Metal device command buffers via zero-copy `newBufferWithBytesNoCopy` with GC in-flight buffer retention.
+2. **Pluggable Modular Engine (`src/engine/`):**
+   * Decoupled transformer layers (`TransformerBlock`, `TransformerModel`, `InferenceEngine`).
+   * `M4QuantizedLinear`: Dynamic runtime dispatch between single-token decode GEMV ($M=1$) and multi-token prompt prefill GEMM ($M > 1$).
+   * Supports Grouped-Query Attention (GQA), RoPE offset alignment, SwiGLU / GeGLU activations, and Gemma 2 `gemma_add_one` RMSNorm.
+   * Dual-mode `M4KVCache`: Pre-allocated circular DRAM buffer (`in_ram`) or Direct I/O flash streaming (`out_of_core`) with `F_NOCACHE` zero-disk-litter.
+3. **PrismML Q2_0 Ternary Codec & Native GGUF Loader:**
+   * 128-weight ternary block format (`QUANT_PRISM_Q2_0`, 34 bytes/block, 2.125 bpw) with dequantization $w = (q - 1) \times d$ and strict $q=3 \to +2\cdot d$ evaluation.
+   * Consumes central BlockMMA core with **zero changes** to shared dispatch code.
+   * Native zero-copy `mmap` GGUF loader (`core/weights/gguf_loader.{h,mm}`) parsing metadata KV tables and extracting Q2_0 tensors with endian-safe FP16 reads.
+4. **Comparative Benchmark Harness (`benchmarks/bench_m4_vs_mlx.py`):**
+   * Side-by-side automated comparative evaluation between custom M4 hardware pipelines and stock MLX baselines across TTFT, prefill throughput, decode latency, decode throughput, and active UMA footprint.
+   * Built-in 32MB UBC purge and asynchronous non-blocking command-buffer pipelining.
+
+```bash
+# Run comparative benchmark harness (quick smoke test)
+.venv/bin/python benchmarks/bench_m4_vs_mlx.py --quick
+
+# Run full C++ verification suite across all 8 formats
+make test
+```
 
 ---
 

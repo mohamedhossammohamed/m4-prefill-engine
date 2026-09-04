@@ -12,6 +12,7 @@
 #include "include/metal/quant/ternary_1_58.metal"
 #include "include/metal/quant/var_rate_affine.metal"
 #include "include/metal/quant/exl3.metal"
+#include "include/metal/quant/prism_q2_0.metal"
 
 #include "include/metal/ops/gemm_mma.metal"
 #include "include/metal/ops/gemm_ternary_vec.metal"
@@ -179,3 +180,20 @@ kernel void test_modular_flash_attn_d128(
     ops::flash_attn_mma_64x64_fp16_core<128>(
         Q, K, V, O, M, scale, shmem, tg_id, simd_lane_id, simd_group_id);
 }
+
+kernel void test_modular_prism_q2_0_gemm(
+    device const half*                    A [[buffer(0)]],
+    device const quant::block_prism_q2_0* B [[buffer(1)]],
+    device half*                          C [[buffer(2)]],
+    constant uint&                        M [[buffer(3)]],
+    constant uint&                        N [[buffer(4)]],
+    constant uint&                        K [[buffer(5)]],
+    threadgroup half*                     shmem [[threadgroup(0)]],
+    uint2 tg_id        [[threadgroup_position_in_grid]],
+    uint  simd_lane_id [[thread_index_in_simdgroup]],
+    uint  simd_group_id [[simdgroup_index_in_threadgroup]])
+{
+    ops::block_mma_64x64_gemm_core<quant::CodecPrismQ2_0, false>(
+        A, B, C, M, N, K, 0, 0, shmem, tg_id, simd_lane_id, simd_group_id);
+}
+

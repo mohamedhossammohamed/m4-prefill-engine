@@ -173,6 +173,27 @@ struct block_ternary_1_58 {
 
 ---
 
+### 7. PrismML Q2_0 (128-Element Ternary Codec)
+*   **Block Size:** 128 elements.
+*   **Weight Footprint:** 34 bytes per block (2 bytes FP16 scale + 32 bytes packed 2-bit codes).
+*   **Alphabet:** $\{-1, 0, +1\}$ (plus reserved code $q=3 \to +2$).
+*   **Effective Bit-Depth:** 2.125 bits/weight raw.
+*   **Dequantization Formula:**
+    $$w_i = (q_i - 1) \times d$$
+    *   $q=0 \to -1 \cdot d$
+    *   $q=1 \to 0 \cdot d$
+    *   $q=2 \to +1 \cdot d$
+    *   $q=3 \to +2 \cdot d$ (PrismML reserved; strictly evaluated to $+2 \cdot d$, never clamped).
+
+```metal
+struct block_prism_q2_0 {
+    half d;          // Shared FP16 scale factor across 128 weights (2 bytes)
+    uint8_t qs[32];  // 128 x 2-bit packed codes, 4 codes/byte, LSB-first (32 bytes)
+};
+```
+
+---
+
 ## 3. The Ternary Reality on Apple Silicon (MMA vs. Vector ALU)
 
 ### The Theoretical Hypothesis
@@ -287,4 +308,14 @@ The runtime registry (`QuantRegistry::instance()`) exposes:
 * Dynamic format lookup by enum (`get(format)`) or string identifier (`get_by_name("MLX_4BIT")`).
 * Exact buffer byte sizing calculations (`compute_weight_bytes(format, count)`).
 * Automatic validation of block size and 128-bit LSU alignment constraints repo-wide.
+
+---
+
+## 7. Native GGUF Loader & Zero-Copy Tensor Extraction (v0.3.0)
+
+To load real model weights directly without relying on external Python dependencies or format conversion scripts, `m4-prefill-engine` provides a zero-copy GGUF loader in `core/weights/`:
+
+*   **Zero-Copy Memory Mapping:** Maps weights directly into process virtual memory with `mmap()`, allowing the Metal device to ingest tensor buffers via `newBufferWithBytesNoCopy`.
+*   **Endian-Safe Unpacking:** Explicit little-endian multi-byte reconstruction (`read_le16`, `read_le32`, `read_le64`) eliminates host vs file endianness assumptions.
+*   **Direct Q2_0 Extraction:** `extract_q2_0_tensor` parses tensor info tables, validates 128-weight divisibility, and unpacks FP16 scales and 2-bit code streams directly into `block_prism_q2_0` memory structures.
 

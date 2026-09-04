@@ -1,0 +1,98 @@
+{
+  "config": {
+    "formats": [
+      "q4_0",
+      "q4_k"
+    ],
+    "prefill_lengths": [
+      128
+    ],
+    "decode_steps": 16,
+    "hidden_dim": 512,
+    "num_layers": 2,
+    "num_warmup": 1,
+    "num_runs": 2,
+    "seed": 42,
+    "quick": true
+  },
+  "prefill_results": [
+    {
+      "format_name": "q4_0",
+      "prefill_len": 128,
+      "m4_ttft_ms": 17.311062503722496,
+      "mlx_ttft_ms": 2.9089579984429292,
+      "m4_throughput_tok_s": 7394.115755314004,
+      "mlx_throughput_tok_s": 44002.01036540034,
+      "speedup": 0.16804040756119965,
+      "max_absolute_diff": 0.0009765625,
+      "status": "PASSED"
+    },
+    {
+      "format_name": "q4_k",
+      "prefill_len": 128,
+      "m4_ttft_ms": 12.52247899901704,
+      "mlx_ttft_ms": 1.8225204985355958,
+      "m4_throughput_tok_s": 10221.618260254016,
+      "mlx_throughput_tok_s": 70232.40622141075,
+      "speedup": 0.14553991255873983,
+      "max_absolute_diff": 0.0,
+      "status": "PASSED"
+    }
+  ],
+  "decode_results": [
+    {
+      "format_name": "q4_0",
+      "context_len": 128,
+      "decode_steps": 16,
+      "m4_latency_ms_tok": 11.174647156167339,
+      "mlx_latency_ms_tok": 1.2202135314964835,
+      "m4_throughput_tok_s": 89.4882841511551,
+      "mlx_throughput_tok_s": 819.528692468759,
+      "speedup": 0.10919481523164175,
+      "max_absolute_diff": 0.00048828125,
+      "status": "PASSED"
+    },
+    {
+      "format_name": "q4_k",
+      "context_len": 128,
+      "decode_steps": 16,
+      "m4_latency_ms_tok": 11.700445312726515,
+      "mlx_latency_ms_tok": 1.2184791560230224,
+      "m4_throughput_tok_s": 85.46683252408394,
+      "mlx_throughput_tok_s": 820.6952043922413,
+      "speedup": 0.1041395539619068,
+      "max_absolute_diff": 0.0,
+      "status": "PASSED"
+    }
+  ],
+  "memory_results": [
+    {
+      "format_name": "q4_0",
+      "backend": "M4 Hardware Pipeline",
+      "initial_mb": 28.95374298095703,
+      "peak_mb": 41.28191375732422,
+      "delta_mb": 12.328170776367188
+    },
+    {
+      "format_name": "q4_0",
+      "backend": "Stock MLX Baseline",
+      "initial_mb": 41.28191375732422,
+      "peak_mb": 59.672584533691406,
+      "delta_mb": 18.390670776367188
+    },
+    {
+      "format_name": "q4_k",
+      "backend": "M4 Hardware Pipeline",
+      "initial_mb": 112.8913345336914,
+      "peak_mb": 118.0944595336914,
+      "delta_mb": 5.203125
+    },
+    {
+      "format_name": "q4_k",
+      "backend": "Stock MLX Baseline",
+      "initial_mb": 118.0944595336914,
+      "peak_mb": 110.188232421875,
+      "delta_mb": 0.0
+    }
+  ]
+}

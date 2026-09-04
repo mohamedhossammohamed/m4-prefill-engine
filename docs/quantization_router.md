@@ -319,3 +319,15 @@ To load real model weights directly without relying on external Python dependenc
 *   **Endian-Safe Unpacking:** Explicit little-endian multi-byte reconstruction (`read_le16`, `read_le32`, `read_le64`) eliminates host vs file endianness assumptions.
 *   **Direct Q2_0 Extraction:** `extract_q2_0_tensor` parses tensor info tables, validates 128-weight divisibility, and unpacks FP16 scales and 2-bit code streams directly into `block_prism_q2_0` memory structures.
 
+---
+
+## 8. References & Upstream Acknowledgements
+
+This quantization routing architecture and codec implementations interface with and build upon specifications and research from the following open-source projects:
+
+*   **[Apple MLX](https://github.com/ml-explore/mlx):** Foundation for zero-copy UMA array bridging and the primary baseline for comparative hardware benchmarks.
+*   **[PrismML](https://prismml.com):** Design and mathematical specification for the Q2_0 128-element ternary quantization scheme (2.125 bpw).
+*   **[llama.cpp / GGML](https://github.com/ggerganov/llama.cpp):** GGUF binary container file format specification and edge quantization standards (`Q4_0`, `Q4_K`, `Q8_0`).
+*   **[ExLlamaV2 / ExLlamaV3](https://github.com/turboderp/exllamav2):** Concept implementations for hierarchical vector codebooks (`EXL3`) and affine variable-rate quantization.
+*   **[BitNet](https://github.com/microsoft/BitNet):** Foundational formulation of 1.58-bit ternary ($\{-1, 0, +1\}$) model representations.
+

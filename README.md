@@ -320,6 +320,25 @@ Any visibility that helps a junior engineer grow and find their footing in the s
 
 ---
 
+## Acknowledgements & Credits
+
+This project builds upon, interfaces with, and draws architectural inspiration from several foundational open-source projects and research teams:
+
+*   **[Apple MLX](https://github.com/ml-explore/mlx) (Apple Machine Learning Research):**
+    For pioneering idiomatic, high-performance machine learning abstractions built natively for Apple Silicon Unified Memory Architecture. `m4-prefill-engine` interfaces directly with MLX unified memory arrays via our zero-copy UMA bridge (`core/bridge/`) and evaluates against MLX as our primary hardware performance baseline.
+*   **[PrismML](https://prismml.com):**
+    For designing the Q2_0 128-element ternary quantization scheme (2.125 bpw) and publishing the mathematical specifications that enabled our native Metal unpacker and GGUF tensor extraction pipeline.
+*   **[llama.cpp & GGML](https://github.com/ggerganov/llama.cpp) (Georgi Gerganov & Contributors):**
+    For defining the standard GGUF binary format parsed by `core/weights/gguf_loader.{h,mm}` and establishing foundational edge quantization standards (`Q4_0`, `Q4_K`, `Q8_0`).
+*   **[ExLlamaV2 / ExLlamaV3](https://github.com/turboderp/exllamav2) (turboderp):**
+    For hierarchical vector codebook quantization concepts (`EXL3`) and high-efficiency variable-rate affine representations.
+*   **[BitNet](https://github.com/microsoft/BitNet) (Microsoft Research):**
+    For pioneering 1.58-bit ternary ($\{-1, 0, +1\}$) language model architectures.
+*   **[FlashAttention](https://github.com/Dao-AILab/flash-attention) (Tri Dao, Daniel Y. Fu, et al.):**
+    For the online softmax tile-scaling mathematical formulation adapted into our barrier-free Apple Silicon attention kernel.
+
+---
+
 ## Contact & Discussion
 
 If you want to discuss Metal optimization, Apple Silicon memory hierarchies, or LLM inference, feel free to reach out:

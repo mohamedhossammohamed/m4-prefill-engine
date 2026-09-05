@@ -3,7 +3,7 @@
 
 > **Live Documentation:** [mohamedhossammohamed.github.io/m4-prefill-engine](https://mohamedhossammohamed.github.io/m4-prefill-engine/)  
 > **Hardware Target:** Apple M4 MacBook Air (10-core GPU, 16GB Unified Memory)  
-> **Version:** v0.3.0 ("Warming the tires")
+> **Version:** v0.3.1 ("Metal vs. Ollama & Ternary Serving")
 
 ---
 
@@ -83,6 +83,56 @@ The streaming engine above solves prefill. The harder question is decode: every 
 #### Honest Caveats
 *   **Draft Acceptance Dependency:** Effective generation speed depends on speculative drafter acceptance rates.
 *   **Numerical Verification Scale:** Double-precision CPU ground truth verification is strictly executed for $M \le 2048$. 1M context decode rows are GPU-only measurements, as $O(M^2)$ CPU verification is physically infeasible at that scale.
+
+---
+
+## 🌿 Featured Deployment: Bonsai Ternary Engine (`projects/bonsai/`)
+
+Looking to run and serve ternary hybrid models? Everything specific to Bonsai 1.7B and 27B lives in the self-contained [`projects/bonsai/`](projects/bonsai/) directory:
+
+- **1-Command Quickstart:**
+  ```bash
+  ./projects/bonsai/run.sh              # Starts Metal GPU backend & Web Chat UI
+  ./projects/bonsai/run.sh --benchmark  # Runs 10-turn dialogue benchmark
+  ```
+- **Live Endpoints:**
+  - Web Chat UI: `http://localhost:8000/`
+  - OpenAI-Compatible API: `http://localhost:8000/v1/chat/completions`
+- **Performance:** **~86–95 tok/s** on Apple Silicon Metal GPU (1.7B model with all 28 layers resident in unified memory).
+- See [`projects/bonsai/README.md`](projects/bonsai/README.md) for architecture, configuration, and API reference.
+
+---
+
+## ⚡ 100-Prompt Comparative Metrology: Metal Engine vs. Ollama (`v0.3.1`)
+
+We evaluated 100 standardized prompts across 5 cognitive categories in full single-process compute isolation on Apple Silicon (M4), comparing Ollama, our Metal server on the **exact same `llama3.2:1b` model weights**, and our 1-bit Ternary Bonsai engine:
+
+| Metric | Ollama (`llama3.2:1b`) | Our Metal Engine (`llama3.2:1b`) | Bonsai 1.7B (`PQ2_0` Ternary) |
+| :--- | :---: | :---: | :---: |
+| **Model Weight File** | `llama3.2:1b` (Q8_0) | **`llama3.2:1b` (Q8_0)** | `Ternary-Bonsai-1.7B` (PQ2_0) |
+| **Weight Equality** | Baseline | **IDENTICAL WEIGHT FILE** | 1-bit Ternary Quantization |
+| **Model Size in RAM** | 1,321 MB | 1,321 MB | **441 MB (-66.6%)** |
+| **Active Parameters** | 1.23 Billion | 1.23 Billion | **1.72 Billion (+39.8%)** |
+| **Mean Decode Speed** | 50.89 tok/s | **67.08 tok/s (+31.8%)** | **134.02 tok/s (2.63x vs Ollama)** |
+| **Median Decode Speed** | 50.81 tok/s | **67.41 tok/s** | **133.59 tok/s** |
+| **P95 Decode Speed** | 57.63 tok/s | **68.07 tok/s** | **141.07 tok/s** |
+| **Max Peak Speed** | 59.26 tok/s | **68.43 tok/s** | **143.20 tok/s** |
+| **Mean Prefill Latency** | 39.46 ms | **32.72 ms** | **45.04 ms** |
+
+### Standardized Execution Scripts
+```bash
+# 1. Run full 100-prompt comparative benchmark suite
+make bench_ollama             # or: python3 benchmarks/bench_metal_vs_ollama.py
+
+# 2. Test native Metal GPU server launch and inference
+make test_metal               # or: bash scripts/test_metal_server.sh
+
+# 3. Assert language coherence & AST code generation
+make test_language            # or: python3 scripts/test_llama32_language.py
+
+# 4. Manage / verify local Ollama daemon
+bash scripts/run_ollama_server.sh
+```
 
 ---
 

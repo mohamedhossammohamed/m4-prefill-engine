@@ -86,7 +86,10 @@ test_tier1_feature_coverage: tests/e2e/test_tier1_feature_coverage.mm $(CORE_SRC
 test_gguf_loader: tests/test_gguf_loader.mm $(CORE_SRCS)
 	$(CXX) $(CXXFLAGS) $(FRAMEWORKS) -o tests/test_gguf_loader tests/test_gguf_loader.mm $(CORE_SRCS)
 
-test: test_core_invariants test_metal_headers test_quant_registry test_kernel_parity test_transformer_layer test_tier1_feature_coverage test_gguf_loader
+test_gguf_layer_streamer: tests/test_gguf_layer_streamer.mm core/weights/gguf_layer_streamer.mm $(CORE_SRCS)
+	$(CXX) $(CXXFLAGS) $(FRAMEWORKS) -o tests/test_gguf_layer_streamer tests/test_gguf_layer_streamer.mm core/weights/gguf_layer_streamer.mm $(CORE_SRCS)
+
+test: test_core_invariants test_metal_headers test_quant_registry test_kernel_parity test_transformer_layer test_tier1_feature_coverage test_gguf_loader test_gguf_layer_streamer
 	./tests/test_core_invariants
 	./tests/test_metal_headers
 	./tests/test_quant_registry
@@ -94,7 +97,19 @@ test: test_core_invariants test_metal_headers test_quant_registry test_kernel_pa
 	./tests/test_transformer_layer
 	./tests/e2e/test_tier1_feature_coverage
 	./tests/test_gguf_loader
+	./tests/test_gguf_layer_streamer
 
 clean:
-	rm -f $(TARGETS) tests/test_core_invariants tests/test_metal_headers tests/test_quant_registry tests/test_kernel_parity tests/test_transformer_layer tests/e2e/test_tier1_feature_coverage tests/test_gguf_loader
+	rm -f $(TARGETS) tests/test_core_invariants tests/test_metal_headers tests/test_quant_registry tests/test_kernel_parity tests/test_transformer_layer tests/e2e/test_tier1_feature_coverage tests/test_gguf_loader tests/test_gguf_layer_streamer
+
+test_metal:
+	bash scripts/test_metal_server.sh
+
+bench_ollama:
+	.venv/bin/python3 benchmarks/bench_metal_vs_ollama.py
+
+test_language:
+	.venv/bin/python3 scripts/test_llama32_language.py
+
+.PHONY: all test clean test_metal bench_ollama test_language
 

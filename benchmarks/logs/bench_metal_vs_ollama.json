@@ -1,0 +1,33 @@
+{
+  "ollama_stats": {
+    "count": 100,
+    "speed_mean": 50.8916537728376,
+    "speed_median": 50.807118712420596,
+    "speed_p95": 57.625574229843195,
+    "speed_min": 42.47603422506458,
+    "speed_max": 59.26408818496322,
+    "ttft_mean_ms": 39.45923998,
+    "ttft_median_ms": 38.648
+  },
+  "our_llama_stats": {
+    "count": 100,
+    "speed_mean": 67.08093396398829,
+    "speed_median": 67.41020851499661,
+    "speed_p95": 68.07232354994972,
+    "speed_min": 62.896271874207464,
+    "speed_max": 68.43024616880662,
+    "ttft_mean_ms": 32.72063,
+    "ttft_median_ms": 30.964
+  },
+  "our_bonsai_stats": {
+    "count": 100,
+    "speed_mean": 134.01924586638083,
+    "speed_median": 133.59420114977203,
+    "speed_p95": 141.06682927273226,
+    "speed_min": 124.32673064814331,
+    "speed_max": 143.20492624946297,
+    "ttft_mean_ms": 45.04432,
+    "ttft_median_ms": 42.754
+  },
+  "prompts_count": 100
+}

@@ -40,3 +40,25 @@ ORIGINAL_REQUEST.md
 agents/
 
 
+
+# Test Executables
+tests/test_*
+tests/e2e/test_*
+!tests/test_*.py
+!tests/test_*.mm
+!tests/test_*.h
+!tests/e2e/*.mm
+!tests/e2e/*.h
+
+# Model weights
+*.gguf
+
+# External tools
+tools/
+
+# Downloaded model directories
+models/bonsai-*/
+projects/**/models/
+
+# Local credentials
+*api_key.txt

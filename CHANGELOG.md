@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
+## [0.3.1] - 2026-09-06 - Metal vs. Ollama & Ternary Serving
+
+### Summary
+Version 0.3.1 packages an empirical, 100-prompt comparative metrology harness evaluating native Apple Silicon Metal GPU serving against stock Ollama runners across identical model weights (`llama3.2:1b` Q8_0) and hardware-accelerated 1-bit ternary formats (`Ternary-Bonsai-1.7B` PQ2_0). On identical model weights, the custom Metal server outperforms Ollama by +31.8% in decode throughput (67.08 vs 50.89 tok/s) and delivers 17% lower prefill latency, bypassing runtime abstraction layers. Transitioning to 1-bit ternary cuts memory bus bandwidth by 66.6% (441 MB vs 1.32 GB), achieving 134.02 tok/s (2.63x faster than Ollama). Standardized scripts provide one-command server runners, automated language coherence verification (Python AST compilation and scientific synthesis), and a self-contained project architecture in `projects/bonsai/`.
+
+### Added
+* **100-Prompt Comparative Metrology Suite (`benchmarks/`):**
+  * Automated benchmark CLI `benchmarks/bench_metal_vs_ollama.py` evaluating identical prompts across Ollama, custom Metal GPU server, and Bonsai 1.7B ternary engine in strict single-process compute isolation.
+  * Raw empirical telemetry preserved in `benchmarks/logs/bench_metal_vs_ollama.json` and formatted report in `benchmarks/logs/bench_metal_vs_ollama_report.md`.
+  * Measured statistical performance: Ollama (50.89 tok/s mean, 50.81 tok/s median), Metal on identical weights (67.08 tok/s mean, 67.41 tok/s median, +31.8%), Bonsai 1.7B ternary (134.02 tok/s mean, 133.59 tok/s median, 2.63x vs Ollama).
+* **Automated Language Coherence & AST Test Harness (`scripts/`):**
+  * `scripts/test_llama32_language.py`: Verifies non-gibberish generation, validates generated Python code via `ast.parse()`, and checks multi-step scientific reasoning against degeneration.
+  * `scripts/test_metal_server.sh`: Automated launcher for `llama-server` with `-ngl 99` and FlashAttention on isolated test port 8089.
+  * `scripts/run_ollama_server.sh`: Daemon runner verifying local Ollama installation, model pull, and API readiness.
+* **Modular Self-Contained Project (`projects/bonsai/`):**
+  * Dedicated directory isolating Bonsai ternary serving (`run.sh`, `server.py`, `benchmark.py`, `api_key.txt`, and ARM NEON runtime) with zero-copy symlinks to local GGUF weights.
+* **Build System Additions (`Makefile`):**
+  * Phony targets `make test_metal`, `make bench_ollama`, and `make test_language`.
+
+---
+
 ## [0.3.0] - 2026-09-04 - Warming the Tires
 
 ### Summary

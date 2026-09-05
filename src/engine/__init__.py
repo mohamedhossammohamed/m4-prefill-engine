@@ -5,6 +5,7 @@ M4 Prefill Engine - Modular Architecture.
 from src.engine.config import EngineConfig
 from src.engine.model import TransformerBlock, TransformerModel
 from src.engine.inference_engine import InferenceEngine
+from src.engine.ngram_drafter import NGramDrafter, SpeculativeStats
 from src.engine.modules import (
     FORMAT_SPECS,
     M4KVCache,
@@ -37,5 +38,7 @@ __all__ = [
     "TransformerBlock",
     "TransformerModel",
     "InferenceEngine",
+    "NGramDrafter",
+    "SpeculativeStats",
 ]
 

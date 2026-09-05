@@ -52,7 +52,8 @@ The `m4-prefill-engine` modularization decouples quantization formats, attention
 | M2 | R2: Header-Only Metal Shading Architecture | Modularize MSL into `include/metal/` (common, quant, ops, entry points), decouple GEMM from unpackers | M1 | PLANNED |
 | M3 | R3: Host Dynamic Codec Registry & Layer Composition | Implement `src/router/quant_registry.h` and `models/transformer_layer.h`, eliminate monoliths | M1, M2 | PLANNED |
 | M4 | R4: Blast Radius Containment & Compatibility Harness | Adapt all 15 Makefile targets and benchmark binaries via thin wrappers, enforce honest reporting | M1, M2, M3 | PLANNED |
-| M5 | Final Verification & Adversarial Hardening | Verify 100% E2E test pass, 1.5% variance envelope, <= 64 registers, all 11 invariants, forensic audit | M0, M4 | PLANNED |
+| M5 | Final Verification & Adversarial Hardening | Verify 100% E2E test pass, 1.5% variance envelope, <= 64 registers, all 11 invariants, forensic audit | M0, M4 | COMPLETED |
+| M6 | Metal vs. Ollama Metrology & Ternary Deployment (v0.3.1) | 100-prompt comparative benchmark on identical weights, language coherence AST tests, self-contained projects/bonsai packaging | M5 | COMPLETED |
 
 ---
 

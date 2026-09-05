@@ -11,6 +11,7 @@ import numpy as np
 from core.bridge.m4_bridge import MetalUMABridge, m4_bridge_synchronize
 from src.engine.config import EngineConfig
 from src.engine.model import TransformerModel
+from src.engine.ngram_drafter import NGramDrafter, SpeculativeStats
 
 
 class InferenceEngine:
@@ -234,6 +235,233 @@ class InferenceEngine:
         self._sequence_length = 0
         self._last_token = None
         self._last_logits = None
+
+    # ------------------------------------------------------------------
+    # N-gram speculative decoding (host-side only, zero kernel changes)
+    # ------------------------------------------------------------------
+
+    def _spec_caches_snapshot(self) -> Optional[dict]:
+        """Snapshots per-layer KV buffers + offsets. None if model has none."""
+        layers = getattr(self.model, "layers", None)
+        if not layers:
+            return {"seq_len": self._sequence_length, "layers": []}
+        snap_layers = []
+        for layer in layers:
+            cache = getattr(layer, "kv_cache", None)
+            if cache is None:
+                snap_layers.append(None)
+                continue
+            entry: dict = {"cache": cache, "offset": cache.offset}
+            for attr in ("_k_buf", "_v_buf", "keys", "values"):
+                buf = getattr(cache, attr, None)
+                if buf is not None:
+                    mx.eval(buf)
+                    entry[attr] = mx.array(np.array(buf, copy=True))
+                else:
+                    entry[attr] = None
+            for attr in ("_capacity", "_seq_dim", "_total_streamed_tokens"):
+                if hasattr(cache, attr):
+                    entry[attr] = getattr(cache, attr)
+            snap_layers.append(entry)
+        return {"seq_len": self._sequence_length, "layers": snap_layers}
+
+    def _spec_caches_restore(self, snap: Optional[dict]) -> None:
+        """Restores a snapshot taken by `_spec_caches_snapshot`."""
+        if not snap:
+            return
+        self._sequence_length = snap["seq_len"]
+        for entry in snap["layers"]:
+            if entry is None:
+                continue
+            cache = entry["cache"]
+            cache._offset = entry["offset"]
+            for attr in ("_k_buf", "_v_buf", "keys", "values"):
+                if attr in entry:
+                    setattr(cache, attr, entry[attr])
+            if "_capacity" in entry:
+                cache._capacity = entry["_capacity"]
+            if "_total_streamed_tokens" in entry:
+                cache._total_streamed_tokens = entry["_total_streamed_tokens"]
+
+    def _spec_caches_truncate(self, target_len: int) -> None:
+        """Truncates live caches back to `target_len` tokens (post-reject)."""
+        self._sequence_length = target_len
+        layers = getattr(self.model, "layers", None)
+        if not layers:
+            return
+        for layer in layers:
+            cache = getattr(layer, "kv_cache", None)
+            if cache is None:
+                continue
+            cache._offset = target_len
+            # MLX concat-style caches: slice arrays; M4 preallocated
+            # buffers are overwritten in place so offset reset suffices.
+            for attr in ("keys", "values"):
+                buf = getattr(cache, attr, None)
+                if buf is not None and hasattr(buf, "ndim"):
+                    if buf.ndim == 4:
+                        seq = 2 if buf.shape[1] == getattr(cache, "n_heads", -1) else 1
+                        if seq == 2:
+                            setattr(cache, attr, buf[:, :, :target_len, :])
+                        else:
+                            setattr(cache, attr, buf[:, :target_len, :, :])
+                    elif buf.ndim == 3:
+                        setattr(cache, attr, buf[:, :target_len, :])
+
+    def _spec_uses_out_of_core(self) -> bool:
+        layers = getattr(self.model, "layers", None)
+        if not layers:
+            return False
+        return any(getattr(getattr(l, "kv_cache", None), "mode", "in_ram") != "in_ram" for l in layers)
+
+    def generate_ngram_speculative(
+        self,
+        prompt_tokens: List[int],
+        max_new_tokens: int = 20,
+        n: int = 3,
+        k: int = 4,
+        temperature: float = 0.0,
+        top_p: float = 1.0,
+        callback: Optional[Callable[[int], None]] = None,
+        eos_token_id: Optional[Union[int, List[int]]] = None,
+        reset_cache: bool = True,
+    ) -> tuple:
+        """
+        N-gram prompt-lookup speculative generation (lossless for greedy).
+
+        Drafts come from the already-seen text via NGramDrafter, verified in
+        ONE batched forward pass. On mismatch, truncates KV caches to the
+        first divergence and continues. Falls back to single-token decoding
+        when no draft exists (or under out-of-core KV mode).
+
+        NOTE on sampling: greedy (temperature=0) is exactly lossless vs
+        `generate()`. For temperature>0 the same-sample fast path is used:
+        statistically consistent, not distribution-exact rejection sampling.
+
+        Returns (generated_tokens, SpeculativeStats).
+        """
+        drafter = NGramDrafter(n=n, k=k)
+        stats = SpeculativeStats()
+        if max_new_tokens <= 0 or len(prompt_tokens) == 0:
+            return [], stats
+
+        start_len = 0 if reset_cache else self._sequence_length
+        if start_len + len(prompt_tokens) > self.config.max_context_length:
+            raise ValueError("Sequence length exceeds max_context_length")
+        if start_len + len(prompt_tokens) + max_new_tokens - 1 > self.config.max_context_length:
+            raise ValueError("Total generation sequence length exceeds max_context_length")
+
+        if reset_cache:
+            self.reset()
+
+        eos_set = set()
+        if eos_token_id is not None:
+            if isinstance(eos_token_id, (list, tuple, set)):
+                eos_set = set(int(t) for t in eos_token_id)
+            else:
+                eos_set = {int(eos_token_id)}
+
+        def _stops(tokens: List[int]) -> Optional[List[int]]:
+            for i, t in enumerate(tokens):
+                if t in eos_set:
+                    return tokens[: i + 1]
+            return None
+
+        final_logits = self.prefill(prompt_tokens)
+        prev_logits = final_logits
+        first_token = self.sample(final_logits, temperature=temperature, top_p=top_p)
+        generated: List[int] = [first_token]
+        self._last_token = first_token
+        self._last_logits = final_logits
+        if callback is not None:
+            callback(first_token)
+        if first_token in eos_set:
+            stats.tokens_generated = 1
+            return generated, stats
+
+        use_spec = not self._spec_uses_out_of_core()
+
+        # Loop invariant (same as generate()): generated[-1] is sampled but
+        # NOT yet fed into the KV cache; cache holds prompt + generated[:-1].
+        while len(generated) < max_new_tokens:
+            room = max_new_tokens - len(generated)
+            context = list(prompt_tokens) + generated
+            draft = drafter.propose(context)[:k] if (use_spec and len(context) >= n) else []
+
+            if not draft or room <= 1:
+                stats.fallback_steps += 1
+                next_tok = self.decode_step(generated[-1], temperature=temperature, top_p=top_p)
+                stats.spec_model_calls += 1
+                generated.append(next_tok)
+                if callback is not None:
+                    callback(next_tok)
+                if next_tok in eos_set:
+                    break
+                continue
+
+            # Clip drafts so emitted tokens (drafts + 1 extra) fit in room.
+            draft_eff = draft[: room - 1]
+            stats.drafts_proposed += 1
+            stats.draft_tokens_proposed += len(draft_eff)
+            snap = self._spec_caches_snapshot()
+            base = snap["seq_len"] if snap else self._sequence_length
+
+            # ONE batched forward: [last_unfed] + drafts. Position i verifies
+            # draft[i] (conditioned on full context); last position samples
+            # the extra token. Cache ends with base + 1 + D tokens fed.
+            batch = [generated[-1]] + draft_eff
+            batch_arr = mx.array([batch], dtype=mx.int32)
+            logits_batch = self.model(batch_arr, use_cache=True)
+            mx.eval(logits_batch)
+            m4_bridge_synchronize()
+            stats.spec_model_calls += 1
+
+            candidates = [logits_batch[0, i, :] for i in range(len(batch))]
+            accepted = 0
+            mismatch_tok: Optional[int] = None
+            for i, d_tok in enumerate(draft_eff):
+                t = self.sample(candidates[i], temperature=temperature, top_p=top_p)
+                if t == d_tok:
+                    accepted += 1
+                else:
+                    mismatch_tok = t
+                    break
+
+            if accepted == len(draft_eff):
+                extra = self.sample(candidates[-1], temperature=temperature, top_p=top_p)
+                new_tokens = draft_eff + [extra]
+                stats.tokens_accepted += len(draft_eff)
+                self._last_logits = candidates[-1]
+            else:
+                assert mismatch_tok is not None
+                # Drop rejected KV tail: keep last_unfed + accepted drafts fed.
+                self._spec_caches_truncate(base + 1 + accepted)
+                new_tokens = draft_eff[:accepted] + [mismatch_tok]
+                stats.tokens_accepted += accepted
+                self._last_logits = candidates[accepted]
+
+            stopped = _stops(new_tokens)
+            emit = stopped if stopped is not None else new_tokens
+            if stopped is not None:
+                # Positional accounting: emit is a prefix of new_tokens whose
+                # first `accepted` entries (full-accept: all of draft_eff)
+                # are fed drafts and whose last entry may be the unfed final.
+                n_draft_slots = accepted if mismatch_tok is not None else len(draft_eff)
+                eos_idx = len(emit) - 1
+                eos_was_fed = eos_idx < n_draft_slots
+                n_emitted_drafts = min(len(emit), n_draft_slots)
+                fed_target = base + 1 + n_emitted_drafts - (1 if eos_was_fed else 0)
+                self._spec_caches_truncate(max(base, fed_target))
+            for t in emit:
+                generated.append(t)
+                if callback is not None:
+                    callback(t)
+            self._last_token = generated[-1]
+            if stopped is not None:
+                break
+
+        stats.tokens_generated = len(generated)
+        return generated, stats
 
     def get_memory_footprint_mb(self) -> float:
         """Returns accurate UMA physical memory footprint via MetalUMABridge."""
